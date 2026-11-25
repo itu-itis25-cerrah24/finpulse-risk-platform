@@ -1,0 +1,42 @@
+# ---------- Python ----------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# ---------- Data ----------
+*.db
+*.sqlite
+*.sqlite3
+
+# ---------- Node / Vite ----------
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Environment ----------
+.env
+.env.local
+.env.*.local
+
+# ---------- Editors ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db

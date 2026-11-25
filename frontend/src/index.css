@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-zinc-950 font-sans text-zinc-200 antialiased;
+  }
+
+  /* Tabular figures keep columns of numbers aligned. */
+  .num {
+    @apply font-mono tabular-nums;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-md border border-zinc-800 bg-zinc-900/60;
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between border-b border-zinc-800 px-4 py-2.5;
+  }
+
+  .panel-title {
+    @apply text-[11px] font-semibold tracking-[0.14em] text-zinc-400 uppercase;
+  }
+
+  .label {
+    @apply text-[10px] font-medium tracking-[0.12em] text-zinc-500 uppercase;
+  }
+}
+
+/* Thin, unobtrusive scrollbars for dense terminal panels. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}

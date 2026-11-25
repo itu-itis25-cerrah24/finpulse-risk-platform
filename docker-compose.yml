@@ -1,0 +1,25 @@
+name: finpulse
+
+services:
+  backend:
+    build: ./backend
+    environment:
+      FINPULSE_DATABASE_URL: sqlite:////data/finpulse.db
+      FINPULSE_CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    volumes:
+      - finpulse-data:/data
+    ports:
+      - "8000:8000" # exposes the FastAPI docs at http://localhost:8000/docs
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  finpulse-data:
