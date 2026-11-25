@@ -149,6 +149,48 @@ class StockHistoryOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Correlation & benchmark
+# ---------------------------------------------------------------------------
+
+
+class CorrelationPairOut(BaseModel):
+    symbol_a: str
+    symbol_b: str
+    correlation: float
+
+
+class CorrelationOut(BaseModel):
+    symbols: list[str]
+    matrix: list[list[float | None]] = Field(..., description="Pearson correlations; null where undefined")
+    observations: int = Field(..., description="Number of date-aligned daily returns used")
+    start_date: str | None
+    end_date: str | None
+    average_correlation: float | None = Field(None, description="Mean off-diagonal correlation")
+    high_correlation_threshold: float
+    high_correlation_pairs: list[CorrelationPairOut]
+    excluded_symbols: list[str] = Field(default_factory=list, description="Symbols without price history")
+
+
+class BenchmarkPointOut(BaseModel):
+    date: str
+    asset_pct: float
+    benchmark_pct: float
+
+
+class BenchmarkOut(BaseModel):
+    symbol: str
+    benchmark_symbol: str
+    window_days: int
+    points: list[BenchmarkPointOut]
+    asset_return_pct: float | None
+    benchmark_return_pct: float | None
+    excess_return_pct: float | None
+    beta: float | None
+    correlation: float | None
+    observations: int
+
+
+# ---------------------------------------------------------------------------
 # Alerts
 # ---------------------------------------------------------------------------
 

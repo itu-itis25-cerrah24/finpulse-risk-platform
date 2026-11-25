@@ -105,6 +105,44 @@ export interface RiskAlert {
   created_at: string;
 }
 
+export interface CorrelationPair {
+  symbol_a: string;
+  symbol_b: string;
+  correlation: number;
+}
+
+export interface CorrelationMatrix {
+  symbols: string[];
+  /** Pearson coefficients; null where undefined (e.g. zero-variance series). */
+  matrix: (number | null)[][];
+  observations: number;
+  start_date: string | null;
+  end_date: string | null;
+  average_correlation: number | null;
+  high_correlation_threshold: number;
+  high_correlation_pairs: CorrelationPair[];
+  excluded_symbols: string[];
+}
+
+export interface BenchmarkPoint {
+  date: string;
+  asset_pct: number;
+  benchmark_pct: number;
+}
+
+export interface BenchmarkComparison {
+  symbol: string;
+  benchmark_symbol: string;
+  window_days: number;
+  points: BenchmarkPoint[];
+  asset_return_pct: number | null;
+  benchmark_return_pct: number | null;
+  excess_return_pct: number | null;
+  beta: number | null;
+  correlation: number | null;
+  observations: number;
+}
+
 export interface NewPosition {
   symbol: string;
   shares: number;

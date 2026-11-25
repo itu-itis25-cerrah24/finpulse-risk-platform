@@ -6,12 +6,17 @@ them to the functions in this module.
 
 from __future__ import annotations
 
+import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from models import WatchlistItem
 from schemas import (
+    BenchmarkOut,
+    BenchmarkPointOut,
+    CorrelationOut,
+    CorrelationPairOut,
     HeadlineOut,
     PortfolioOut,
     PortfolioSummaryOut,
@@ -21,11 +26,18 @@ from schemas import (
     SentimentOut,
     StockHistoryOut,
 )
-from services.market_service import MarketService, NewsHeadline
+from services.market_service import MarketService, NewsHeadline, PricePoint
 from services.risk_engine import (
+    HIGH_CORRELATION_THRESHOLD,
     QuantMetrics,
     SentimentSummary,
+    align_returns,
     analyze_headlines,
+    average_pairwise_correlation,
+    benchmark_for_symbol,
+    compare_to_benchmark,
+    correlation_matrix,
+    correlation_pairs,
     calculate_position_pnl,
     calculate_risk_score,
     classify_daily_change,
@@ -223,4 +235,89 @@ def build_stock_detail(symbol: str, market: MarketService) -> StockHistoryOut | 
         quant=_quant_out(metrics),
         risk_score=risk_score,
         risk_level=classify_risk_level(risk_score),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Correlation & benchmark
+# ---------------------------------------------------------------------------
+
+
+def _as_pairs(history: list[PricePoint]) -> list[tuple[str, float]]:
+    return [(p.date, p.close) for p in history]
+
+
+def build_correlation(items: list[WatchlistItem], market: MarketService) -> CorrelationOut:
+    """Pearson correlation matrix of date-aligned daily returns across the portfolio."""
+    symbols = [item.symbol for item in items]
+    if symbols:
+        with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_FETCHES, len(symbols))) as pool:
+            histories = dict(zip(symbols, pool.map(market.get_history, symbols), strict=True))
+    else:
+        histories = {}
+
+    excluded = [s for s in symbols if not histories[s]]
+    series = {s: _as_pairs(histories[s]) for s in symbols if histories[s]}
+    aligned = align_returns(series)
+    matrix = correlation_matrix(aligned.returns)
+
+    def clean(value: float) -> float | None:
+        return round(float(value), 4) if math.isfinite(value) else None
+
+    average = average_pairwise_correlation(matrix)
+    return CorrelationOut(
+        symbols=aligned.symbols,
+        matrix=[[clean(v) for v in row] for row in matrix],
+        observations=aligned.observations,
+        start_date=aligned.dates[0] if aligned.dates else None,
+        end_date=aligned.dates[-1] if aligned.dates else None,
+        average_correlation=None if average is None else round(average, 4),
+        high_correlation_threshold=HIGH_CORRELATION_THRESHOLD,
+        high_correlation_pairs=[
+            CorrelationPairOut(symbol_a=p.symbol_a, symbol_b=p.symbol_b, correlation=round(p.correlation, 4))
+            for p in correlation_pairs(aligned.symbols, matrix)
+            if p.correlation > HIGH_CORRELATION_THRESHOLD
+        ],
+        excluded_symbols=excluded,
+    )
+
+
+class BenchmarkUnavailableError(Exception):
+    """Raised when the benchmark index has no price history."""
+
+
+def build_benchmark_comparison(symbol: str, window_days: int, market: MarketService) -> BenchmarkOut | None:
+    """Rebase ``symbol`` and its benchmark to 0% at the start of the window.
+
+    Returns ``None`` when the symbol itself has no history; raises
+    ``BenchmarkUnavailableError`` when only the benchmark is missing.
+    """
+    asset_history = market.get_history(symbol)
+    if not asset_history:
+        return None
+
+    benchmark_symbol = benchmark_for_symbol(symbol)
+    benchmark_history = market.get_history(benchmark_symbol)
+    if not benchmark_history:
+        raise BenchmarkUnavailableError(f"No price history for benchmark {benchmark_symbol}")
+
+    start_date = (datetime.now(timezone.utc) - timedelta(days=window_days)).date().isoformat()
+    comparison = compare_to_benchmark(_as_pairs(asset_history), _as_pairs(benchmark_history), start_date)
+
+    return BenchmarkOut(
+        symbol=symbol,
+        benchmark_symbol=benchmark_symbol,
+        window_days=window_days,
+        points=[
+            BenchmarkPointOut(date=d, asset_pct=round(a, 2), benchmark_pct=round(b, 2))
+            for d, a, b in zip(
+                comparison.dates, comparison.asset_cumulative_pct, comparison.benchmark_cumulative_pct, strict=True
+            )
+        ],
+        asset_return_pct=comparison.asset_return_pct,
+        benchmark_return_pct=comparison.benchmark_return_pct,
+        excess_return_pct=comparison.excess_return_pct,
+        beta=comparison.beta,
+        correlation=comparison.correlation,
+        observations=comparison.observations,
     )

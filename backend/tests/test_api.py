@@ -1,6 +1,7 @@
 """API tests using an in-memory database and a fake (offline) market data provider."""
 
 from collections.abc import Iterator
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +19,12 @@ FAKE_QUOTES = {
     "MSFT": Quote("MSFT", price=400.0, previous_close=398.0, change_pct=0.5025, currency="USD"),
 }
 
+FAKE_HISTORY = {
+    "AAPL": [120, 125, 118, 110, 112, 105, 110, 100],
+    "MSFT": [300, 330, 297, 270, 280, 260, 270, 250],  # moves almost in lock-step with AAPL
+    "SPY": [500, 505, 500, 495, 498, 494, 497, 492],
+}
+
 
 class FakeMarketService(MarketService):
     """Deterministic market data so API tests never touch the network."""
@@ -26,10 +33,14 @@ class FakeMarketService(MarketService):
         return FAKE_QUOTES.get(symbol, Quote.unavailable(symbol))
 
     def get_history(self, symbol: str) -> list[PricePoint]:
-        if symbol not in FAKE_QUOTES:
+        closes = FAKE_HISTORY.get(symbol)
+        if closes is None:
             return []
-        closes = [120, 125, 118, 110, 112, 105, 110, 100]
-        return [PricePoint(date=f"2026-01-{i + 1:02d}", close=float(c)) for i, c in enumerate(closes)]
+        # Dates end today so window-based endpoints (benchmark) include every point.
+        start = date.today() - timedelta(days=len(closes) - 1)
+        return [
+            PricePoint(date=(start + timedelta(days=i)).isoformat(), close=float(c)) for i, c in enumerate(closes)
+        ]
 
     def get_news(self, symbol: str) -> list[NewsHeadline]:
         if symbol != "AAPL":
@@ -126,3 +137,44 @@ def test_alerts_are_generated_once_per_day(client: TestClient) -> None:
 
     second = client.get("/api/alerts").json()
     assert len(second) == len(first)  # de-duplicated
+
+
+def test_correlation_matrix_endpoint(client: TestClient) -> None:
+    _add(client, "AAPL")
+    _add(client, "MSFT")
+    body = client.get("/api/portfolio/correlation").json()
+
+    assert body["symbols"] == ["AAPL", "MSFT"]
+    assert body["observations"] == 7
+    assert body["matrix"][0][0] == 1.0
+    assert body["matrix"][0][1] == body["matrix"][1][0]
+    assert body["matrix"][0][1] > 0.9
+    assert body["high_correlation_pairs"][0]["symbol_a"] == "AAPL"
+
+
+def test_correlation_matrix_for_empty_portfolio(client: TestClient) -> None:
+    body = client.get("/api/portfolio/correlation").json()
+    assert body["symbols"] == []
+    assert body["matrix"] == []
+    assert body["average_correlation"] is None
+
+
+def test_benchmark_comparison_endpoint(client: TestClient) -> None:
+    body = client.get("/api/stock/AAPL/benchmark?days=30").json()
+
+    assert body["benchmark_symbol"] == "SPY"
+    assert body["points"][0] == {"date": body["points"][0]["date"], "asset_pct": 0.0, "benchmark_pct": 0.0}
+    assert body["asset_return_pct"] == pytest.approx(-16.67, abs=0.01)  # 120 -> 100
+    assert body["benchmark_return_pct"] == pytest.approx(-1.6, abs=0.01)  # 500 -> 492
+    assert body["excess_return_pct"] == pytest.approx(-15.07, abs=0.01)
+
+
+def test_benchmark_comparison_errors(client: TestClient) -> None:
+    assert client.get("/api/stock/ZZZZ/benchmark").status_code == 404
+    # BIST symbols compare against XU100.IS, which the fake provider does not serve.
+    FAKE_HISTORY["TEST.IS"] = [10, 11, 12]
+    try:
+        assert client.get("/api/stock/TEST.IS/benchmark").status_code == 503
+    finally:
+        del FAKE_HISTORY["TEST.IS"]
+    assert client.get("/api/stock/AAPL/benchmark?days=1").status_code == 422

@@ -12,11 +12,25 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_db, init_db
 from models import RiskAlert, WatchlistItem
-from schemas import AlertOut, PortfolioOut, StockHistoryOut, WatchlistCreate, WatchlistItemOut
+from schemas import (
+    AlertOut,
+    BenchmarkOut,
+    CorrelationOut,
+    PortfolioOut,
+    StockHistoryOut,
+    WatchlistCreate,
+    WatchlistItemOut,
+)
 from seed import seed_default_watchlist
 from services.alert_service import refresh_alerts
-from services.market_service import MarketService, market_service
-from services.portfolio_service import build_portfolio, build_stock_detail
+from services.market_service import HISTORY_LOOKBACK_DAYS, MarketService, market_service
+from services.portfolio_service import (
+    BenchmarkUnavailableError,
+    build_benchmark_comparison,
+    build_correlation,
+    build_portfolio,
+    build_stock_detail,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -78,6 +92,15 @@ def get_portfolio(
     return portfolio
 
 
+@app.get("/api/portfolio/correlation", response_model=CorrelationOut, tags=["portfolio"])
+def get_portfolio_correlation(
+    db: Session = Depends(get_db),
+    market: MarketService = Depends(get_market_service),
+) -> CorrelationOut:
+    """Pairwise Pearson correlation of date-aligned 90-day daily returns."""
+    return build_correlation(_load_watchlist(db), market)
+
+
 @app.post(
     "/api/portfolio",
     response_model=WatchlistItemOut,
@@ -123,6 +146,22 @@ def get_stock_history(
     if detail is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No market data found for symbol {symbol}")
     return detail
+
+
+@app.get("/api/stock/{symbol}/benchmark", response_model=BenchmarkOut, tags=["market"])
+def get_stock_benchmark(
+    symbol: str,
+    days: int = Query(HISTORY_LOOKBACK_DAYS, ge=5, le=HISTORY_LOOKBACK_DAYS, description="Comparison window in calendar days"),
+    market: MarketService = Depends(get_market_service),
+) -> BenchmarkOut:
+    """Cumulative % return of a symbol vs its benchmark (SPY, or XU100.IS for BIST), rebased to 0%."""
+    try:
+        comparison = build_benchmark_comparison(symbol.strip().upper(), days, market)
+    except BenchmarkUnavailableError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    if comparison is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No market data found for symbol {symbol}")
+    return comparison
 
 
 @app.get("/api/alerts", response_model=list[AlertOut], tags=["alerts"])

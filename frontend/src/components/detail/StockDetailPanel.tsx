@@ -73,7 +73,7 @@ export function StockDetailPanel({ symbol, position, refreshKey }: StockDetailPa
           {error ? (
             <div className="flex h-[300px] items-center justify-center text-sm text-rose-400">{error}</div>
           ) : detail ? (
-            <PriceChart history={detail.history} currency={detail.currency} avgCost={position?.avg_cost} />
+            <PriceChart symbol={symbol} history={detail.history} currency={detail.currency} avgCost={position?.avg_cost} />
           ) : (
             <div className="h-[300px] animate-pulse rounded bg-zinc-800/30" />
           )}

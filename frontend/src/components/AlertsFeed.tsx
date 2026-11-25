@@ -19,7 +19,7 @@ interface AlertsFeedProps {
 
 export function AlertsFeed({ alerts, onSelectSymbol }: AlertsFeedProps) {
   return (
-    <section className="panel flex max-h-[calc(100vh-15rem)] min-h-[320px] flex-col xl:sticky xl:top-[4.25rem]">
+    <section className="panel flex max-h-[560px] min-h-[240px] flex-col">
       <header className="panel-header">
         <h2 className="panel-title">Risk Alerts</h2>
         <span className="num text-[11px] text-zinc-500">{alerts.length} events</span>

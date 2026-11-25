@@ -1,5 +1,12 @@
 import { API_BASE_URL } from "../config";
-import type { NewPosition, Portfolio, RiskAlert, StockDetail } from "./types";
+import type {
+  BenchmarkComparison,
+  CorrelationMatrix,
+  NewPosition,
+  Portfolio,
+  RiskAlert,
+  StockDetail,
+} from "./types";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -61,6 +68,11 @@ export const api = {
 
   getStockDetail: (symbol: string, signal?: AbortSignal) =>
     request<StockDetail>(`/api/stock/${encodeURIComponent(symbol)}/history`, { signal }),
+
+  getCorrelation: (signal?: AbortSignal) => request<CorrelationMatrix>("/api/portfolio/correlation", { signal }),
+
+  getBenchmark: (symbol: string, days: number, signal?: AbortSignal) =>
+    request<BenchmarkComparison>(`/api/stock/${encodeURIComponent(symbol)}/benchmark?days=${days}`, { signal }),
 
   // Alert rules are re-evaluated by GET /api/portfolio, so skip the duplicate work here.
   getAlerts: (limit = 50, signal?: AbortSignal) =>

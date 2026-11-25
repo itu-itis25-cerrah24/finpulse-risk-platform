@@ -1,5 +1,7 @@
 # FinPulse — Quantitative Portfolio Risk & Market Sentiment Terminal
 
+[![CI](https://github.com/itu-itis25-cerrah24/finpulse-risk-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/itu-itis25-cerrah24/finpulse-risk-platform/actions/workflows/ci.yml)
+
 A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **global equity** portfolios. FinPulse pulls live market data, computes institutional risk metrics from return distributions, scores news sentiment with NLP, and condenses everything into a single composite risk score and an alert stream, presented in a dark, Bloomberg-inspired dashboard.
 
 ![FinPulse Terminal](docs/dashboard.png)
@@ -11,6 +13,8 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 | Area | What it does |
 | --- | --- |
 | **Quant risk engine** | Vectorized NumPy computation of **Annualized Volatility** (σ × √252), **95% Historical VaR** (1-day, empirical 5th percentile), **Max Drawdown** (running-peak method) and **Sharpe Ratio** (4% risk-free rate) from 90 days of daily returns. Pure functions with no I/O, so every metric is unit-tested against hand-calculated values. |
+| **Portfolio correlation matrix** | Pairwise **Pearson correlation** of daily returns. Prices are first **inner-joined on common trading dates**, because BIST and NYSE holidays differ, so every return covers the same calendar interval for every symbol. Pairs above ρ = 0.70 are flagged as concentration risk in a hover-enabled heatmap. |
+| **Benchmark comparison** | Each stock can be overlaid on its benchmark (**SPY** for US equities, **XU100.IS** for BIST). Both series are rebased to **0% cumulative return** at the start of the selected 1M/2M/3M window, with excess return, **beta** (Cov/Var) and correlation shown alongside. |
 | **Composite risk score (0–100)** | Weighted blend of volatility, VaR, drawdown, daily move and news sentiment. Each factor is scaled against a "maximum risk" cap, and weights are **re-normalized when a factor is unavailable**, so a missing news feed never skews the score. |
 | **NLP sentiment** | VADER scores every headline (`BULLISH` / `BEARISH` / `NEUTRAL` at ±0.05 compound), then aggregates per symbol. |
 | **5-minute TTL caching** | A thread-safe `cachetools.TTLCache` wraps every Yahoo Finance call. Repeat dashboard loads drop from ~5.7 s to ~6 ms. Failed lookups are deliberately **not cached**, so the next request retries. |
@@ -18,7 +22,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 | **Thread-safe alert deduplication** | Alert rules (sharp drop/spike, high risk score, bearish news, deep drawdown) are pure functions. Persistence uses a check-then-insert under a lock, so concurrent refreshes (multiple tabs, React StrictMode) never store the same alert twice in one day. |
 | **Concurrent data fetching** | Positions are analyzed in parallel with a `ThreadPoolExecutor`, since the work is network-bound. |
 | **Graceful degradation** | Missing prices, empty news or upstream outages return well-defined fallbacks instead of 500s. The UI shows `NO DATA` or an offline state. |
-| **43 automated tests** | `pytest` suite covering every quant metric, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). |
+| **68 automated tests + CI** | `pytest` suite covering every quant metric, correlation, date alignment, beta and benchmark rebasing, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). **GitHub Actions** runs the backend tests and the strict TypeScript check and production build on every push and pull request to `main`. |
 
 ---
 
@@ -49,6 +53,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 
 **Infrastructure**
 - Docker (multi-stage builds) · Docker Compose · Nginx (static hosting + reverse proxy)
+- GitHub Actions (CI: pytest, strict type-check, production build)
 
 ---
 
@@ -97,7 +102,7 @@ finpulse-risk-platform/
 │   │   ├── risk_engine.py      # Volatility, VaR, drawdown, Sharpe, sentiment, score
 │   │   ├── portfolio_service.py# Orchestration + USD aggregation
 │   │   └── alert_service.py    # Alert rules + deduplicated persistence
-│   ├── tests/                  # 43 pytest tests
+│   ├── tests/                  # 68 pytest tests
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
@@ -107,6 +112,7 @@ finpulse-risk-platform/
 │   │   └── lib/format.ts       # Number/currency formatting, semantic colors
 │   ├── nginx.conf
 │   └── Dockerfile
+├── .github/workflows/ci.yml    # CI pipeline
 ├── docs/                       # Screenshots
 └── docker-compose.yml
 ```
@@ -142,7 +148,7 @@ python -m venv .venv
 # Windows:  .\.venv\Scripts\Activate.ps1
 # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-pytest                                   # 43 tests
+pytest                                   # 68 tests
 uvicorn main:app --reload --port 8000
 ```
 
@@ -176,7 +182,9 @@ On first startup the backend seeds a demo portfolio of `THYAO.IS`, `ASELS.IS`, `
 | `GET` | `/api/portfolio` | All positions with live prices, quant metrics, sentiment and risk score, plus a USD portfolio summary (total value, P&L, weighted risk score). Also evaluates alert rules. |
 | `POST` | `/api/portfolio` | Add a position `{symbol, shares, avg_cost, risk_threshold_pct}`. Validates the ticker against live data. Returns `201`, or `409` for a duplicate and `404` for an unknown symbol. |
 | `DELETE` | `/api/portfolio/{item_id}` | Remove a position. Returns `204`, or `404` if not found. |
+| `GET` | `/api/portfolio/correlation` | Pearson correlation matrix of date-aligned 90-day daily returns, average pairwise ρ, and pairs above 0.70 (concentration risk). |
 | `GET` | `/api/stock/{symbol}/history` | 90-day closing prices, sentiment-scored headlines, quant metrics and risk score for any symbol. |
+| `GET` | `/api/stock/{symbol}/benchmark?days=90` | Cumulative % return of the symbol vs SPY (or XU100.IS for `.IS` symbols), rebased to 0% at the window start, plus excess return, beta and correlation. Returns `503` if benchmark data is unavailable. |
 | `GET` | `/api/alerts?limit=50&refresh=true` | Most recent risk alerts, newest first, with severity `LOW` / `MEDIUM` / `HIGH` / `CRITICAL`. |
 | `GET` | `/api/health` | Liveness probe used by the Docker health check. |
 
@@ -191,6 +199,9 @@ On first startup the backend seeds a demo portfolio of `THYAO.IS`, `ASELS.IS`, `
 | 95% Historical VaR | −(5th percentile of r), floored at 0, reported as a positive 1-day loss % |
 | Max drawdown | min(Pₜ / max(P₀…Pₜ) − 1) |
 | Sharpe ratio | (mean(r) − 4% / 252) / std-dev(r) × √252 |
+| Correlation | Pearson ρ of daily returns, computed on prices inner-joined by date |
+| Beta | Cov(r_asset, r_benchmark) / Var(r_benchmark) |
+| Cumulative return | (Pₜ / P_start − 1) × 100, rebased at the window start |
 | Risk score | 30% volatility (cap 60%) · 25% VaR (cap 5%) · 20% drawdown (cap 40%) · 10% daily move (cap 10%) · 15% sentiment |
 | Risk level | `LOW` < 35 ≤ `MODERATE` < 65 ≤ `HIGH` |
 
@@ -204,7 +215,8 @@ pytest -v
 ```
 
 - `tests/test_risk_engine.py`: volatility, VaR, max drawdown and Sharpe against closed-form values; risk-score bounds, weighting and re-normalization; sentiment classification; P&L and daily-move flags.
-- `tests/test_api.py`: full CRUD, validation (`409` / `404` / `422`), stock history and alert deduplication, using an in-memory SQLite database and a deterministic fake market data provider.
+- `tests/test_correlation_benchmark.py`: cross-market date alignment, Pearson correlation (±1, hand-calculated, zero-variance and too-few-observation cases), pair ranking, benchmark selection, rebasing, beta and windowing.
+- `tests/test_api.py`: full CRUD, correlation and benchmark endpoints, validation (`409` / `404` / `422`), stock history and alert deduplication, using an in-memory SQLite database and a deterministic fake market data provider.
 
 ```bash
 cd frontend

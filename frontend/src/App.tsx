@@ -5,6 +5,7 @@ import { api } from "./api/client";
 import type { Position } from "./api/types";
 import { AddPositionModal } from "./components/AddPositionModal";
 import { AlertsFeed } from "./components/AlertsFeed";
+import { CorrelationHeatmap } from "./components/CorrelationHeatmap";
 import { Header } from "./components/Header";
 import { KpiBar } from "./components/KpiBar";
 import { PortfolioTable } from "./components/PortfolioTable";
@@ -127,7 +128,8 @@ export default function App() {
                   </Suspense>
                 )}
               </div>
-              <aside className="min-w-0 xl:col-span-3">
+              <aside className="min-w-0 space-y-3 xl:col-span-3">
+                <CorrelationHeatmap refreshKey={lastUpdated?.getTime()} onSelectSymbol={setSelectedSymbol} />
                 <AlertsFeed alerts={alerts} onSelectSymbol={setSelectedSymbol} />
               </aside>
             </div>
