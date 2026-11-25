@@ -155,7 +155,7 @@ export function StressTestPanel({ refreshKey }: { refreshKey: unknown }) {
   };
 
   return (
-    <section className="panel flex min-w-0 flex-col">
+    <section className="panel flex h-full min-w-0 flex-col">
       <header className="panel-header">
         <div className="flex items-center gap-2">
           <h3 className="panel-title">Stress Test · Scenario Analysis</h3>

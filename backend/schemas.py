@@ -1,6 +1,7 @@
 """Pydantic request/response schemas (API contract)."""
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -295,6 +296,75 @@ class StressTestOut(BaseModel):
     total_pnl_pct: float | None
     worst_hit_symbol: str | None
     excluded_symbols: list[str] = Field(default_factory=list, description="No live price or FX rate")
+
+
+# ---------------------------------------------------------------------------
+# Risk Lab: Markowitz optimisation
+# ---------------------------------------------------------------------------
+
+
+class RebalanceAction(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
+
+
+class WeightOut(BaseModel):
+    symbol: str
+    weight_pct: float
+
+
+class PortfolioPointOut(BaseModel):
+    expected_return_pct: float = Field(..., description="Annualised mean log-return")
+    volatility_pct: float = Field(..., description="Annualised volatility")
+    sharpe_ratio: float | None = Field(None, description="(return - rf) / volatility")
+    weights: list[WeightOut]
+
+
+class FrontierPointOut(BaseModel):
+    expected_return_pct: float
+    volatility_pct: float
+    sharpe_ratio: float | None
+
+
+class AssetMomentsOut(BaseModel):
+    symbol: str
+    value_usd: float
+    expected_return_pct: float
+    volatility_pct: float
+
+
+class RebalanceRowOut(BaseModel):
+    symbol: str
+    current_weight_pct: float
+    target_weight_pct: float
+    delta_weight_pct: float
+    delta_usd: float = Field(..., description="Positive = buy, negative = sell")
+    action: RebalanceAction
+
+
+class RebalancingOut(BaseModel):
+    max_sharpe: list[RebalanceRowOut]
+    min_volatility: list[RebalanceRowOut]
+
+
+class OptimizationOut(BaseModel):
+    samples: int = Field(..., description="Candidate portfolios evaluated (including anchors)")
+    seed: int | None
+    risk_free_rate_pct: float
+    observations: int
+    start_date: str
+    end_date: str
+    covariance_jitter: float
+    total_value_usd: float
+    assets: list[AssetMomentsOut]
+    current_portfolio: PortfolioPointOut
+    max_sharpe: PortfolioPointOut
+    min_volatility: PortfolioPointOut
+    frontier_cloud: list[FrontierPointOut] = Field(..., description="Downsampled candidates for plotting")
+    efficient_frontier: list[FrontierPointOut] = Field(..., description="Upper frontier, by increasing volatility")
+    rebalancing: RebalancingOut
+    excluded_symbols: list[str] = Field(default_factory=list, description="No live price, FX rate or history")
 
 
 # ---------------------------------------------------------------------------

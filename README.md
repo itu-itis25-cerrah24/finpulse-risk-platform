@@ -17,6 +17,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 | **Benchmark comparison** | Each stock can be overlaid on its benchmark (**SPY** for US equities, **XU100.IS** for BIST). Both series are rebased to **0% cumulative return** at the start of the selected 1M/2M/3M window, with excess return, **beta** (Cov/Var) and correlation shown alongside. |
 | **Correlated Monte Carlo simulation** | Thousands of **Geometric Brownian Motion** paths of total portfolio value in USD. Cross-asset correlation is preserved by colouring independent normal draws with the **Cholesky factor** of the historical log-return covariance; a scaled **diagonal jitter** fallback keeps singular matrices (collinear or single-asset books) factorisable. **Antithetic variates** cut sampling noise, and an optional **seed** makes every run reproducible. Output: p5/p25/p50/p75/p95 fan bands plus simulated **VaR, CVaR (Expected Shortfall)** and probability of loss. |
 | **Stress testing** | Instant USD revaluation under preset crises (COVID crash, tech selloff, lira crisis, Fed hike) or custom US-equity / BIST-equity / USD-TRY shocks. Lira holdings take both the equity and the **currency-translation** hit. The UI sliders reprice the book live (debounced). |
+| **Markowitz portfolio optimizer** | Long-only mean-variance optimization **without SciPy**. The weight simplex (w ≥ 0, Σw = 1) is sampled with **Dirichlet draws** (uniform and sparse), plus anchors: every single-asset corner, equal weight and the current allocation. Each candidate is scored on annualized return, volatility and Sharpe ratio. The result includes the **max-Sharpe** and **min-volatility** portfolios, the **efficient frontier**, and a USD **rebalancing plan**. Seeded, so results are reproducible. |
 | **Composite risk score (0–100)** | Weighted blend of volatility, VaR, drawdown, daily move and news sentiment. Each factor is scaled against a "maximum risk" cap, and weights are **re-normalized when a factor is unavailable**, so a missing news feed never skews the score. |
 | **NLP sentiment** | VADER scores every headline (`BULLISH` / `BEARISH` / `NEUTRAL` at ±0.05 compound), then aggregates per symbol. |
 | **5-minute TTL caching** | A thread-safe `cachetools.TTLCache` wraps every Yahoo Finance call. Repeat dashboard loads drop from ~5.7 s to ~6 ms. Failed lookups are deliberately **not cached**, so the next request retries. |
@@ -24,7 +25,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 | **Thread-safe alert deduplication** | Alert rules (sharp drop/spike, high risk score, bearish news, deep drawdown) are pure functions. Persistence uses a check-then-insert under a lock, so concurrent refreshes (multiple tabs, React StrictMode) never store the same alert twice in one day. |
 | **Concurrent data fetching** | Positions are analyzed in parallel with a `ThreadPoolExecutor`, since the work is network-bound. |
 | **Graceful degradation** | Missing prices, empty news or upstream outages return well-defined fallbacks instead of 500s. The UI shows `NO DATA` or an offline state. |
-| **123 automated tests + CI** | `pytest` suite covering every quant metric, correlation, date alignment, beta and benchmark rebasing, seeded Monte Carlo determinism, the Cholesky fallback, the CVaR ≥ VaR invariant, every stress scenario, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). **GitHub Actions** runs the backend tests and the strict TypeScript check and production build on every push and pull request to `main`. |
+| **145 automated tests + CI** | `pytest` suite covering every quant metric, correlation, date alignment, beta and benchmark rebasing, seeded Monte Carlo determinism, optimizer weight validity, frontier dominance, the closed-form minimum-variance check, the Cholesky fallback, the CVaR ≥ VaR invariant, every stress scenario, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). **GitHub Actions** runs the backend tests and the strict TypeScript check and production build on every push and pull request to `main`. |
 
 ---
 
@@ -75,7 +76,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
  │  FastAPI (backend container)                     main.py · schemas   │
  │                                                                      │
  │   portfolio_service ──► risk_engine (NumPy · VADER, pure functions)  │
- │          │         ──► monte_carlo · stress_test (pure NumPy)         │
+ │          │         ──► monte_carlo · stress_test · optimizer (NumPy)  │
  │          │                                                           │
  │          ├──────────► market_service ──► TTLCache (5 min, locked)    │
  │          │                   │                                       │
@@ -105,16 +106,17 @@ finpulse-risk-platform/
 │   │   ├── risk_engine.py      # Volatility, VaR, drawdown, Sharpe, sentiment, score
 │   │   ├── monte_carlo.py      # Correlated GBM, Cholesky + jitter, VaR/CVaR
 │   │   ├── stress_test.py      # Preset & custom factor-shock scenarios
+│   │   ├── optimizer.py        # Markowitz simplex search, efficient frontier
 │   │   ├── portfolio_service.py# Orchestration + USD aggregation
 │   │   └── alert_service.py    # Alert rules + deduplicated persistence
-│   ├── tests/                  # 123 pytest tests
+│   ├── tests/                  # 145 pytest tests
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
 │   │   ├── api/                # Typed client + response types
 │   │   ├── hooks/              # useDashboard, useStockDetail, useApiResource
 │   │   ├── components/         # KPI bar, table, deep dive, heatmap, alerts, modal
-│   │   │   └── risklab/        # Monte Carlo fan chart + stress-test simulator
+│   │   │   └── risklab/        # Monte Carlo fan chart, stress test, MPT optimizer
 │   │   └── lib/format.ts       # Number/currency formatting, semantic colors
 │   ├── nginx.conf
 │   └── Dockerfile
@@ -154,7 +156,7 @@ python -m venv .venv
 # Windows:  .\.venv\Scripts\Activate.ps1
 # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-pytest                                   # 123 tests
+pytest                                   # 145 tests
 uvicorn main:app --reload --port 8000
 ```
 
@@ -190,6 +192,7 @@ On first startup the backend seeds a demo portfolio of `THYAO.IS`, `ASELS.IS`, `
 | `DELETE` | `/api/portfolio/{item_id}` | Remove a position. Returns `204`, or `404` if not found. |
 | `GET` | `/api/portfolio/correlation` | Pearson correlation matrix of date-aligned 90-day daily returns, average pairwise ρ, and pairs above 0.70 (concentration risk). |
 | `GET` | `/api/portfolio/monte-carlo?days=90&simulations=1000&seed=42&drift=historical` | Correlated GBM simulation of total USD value: daily p5/p25/p50/p75/p95 bands, expected value and return, simulated 95% VaR and CVaR, probability of loss. `days` 1–252, `simulations` 100–5000, `drift` `historical` or `zero`. Returns `422` if fewer than 5 aligned returns exist. |
+| `GET` | `/api/portfolio/optimize?samples=4000&seed=42` | Markowitz long-only optimization over USD log-returns. Returns the current, max-Sharpe and min-volatility portfolios (return, volatility, Sharpe, weights), a ~300-point risk/return cloud, the efficient frontier, and per-symbol rebalancing for both targets (current / target / Δ weight, USD trade, `BUY` / `SELL` / `HOLD`). `samples` is 100–20000. A single holding returns its current 100% weight. Returns `422` with fewer than 5 aligned returns. |
 | `GET` | `/api/portfolio/stress-test/scenarios` | Preset crisis scenarios and their shocks. |
 | `POST` | `/api/portfolio/stress-test` | Body `{"scenario": "covid_crash" \| "tech_selloff" \| "usd_try_spike" \| "rate_hike"}` **or** custom `{us_equity_shock_pct, bist_equity_shock_pct, usd_try_shock_pct}` (mixing both is a `422`). Returns per-holding and total USD value before/after, P&L in USD and %, and the worst-hit position. |
 | `GET` | `/api/stock/{symbol}/history` | 90-day closing prices, sentiment-scored headlines, quant metrics and risk score for any symbol. |
@@ -225,6 +228,19 @@ On first startup the backend seeds a demo portfolio of `THYAO.IS`, `ASELS.IS`, `
    - CVaR₉₅ = −E[X | X ≤ q₀.₀₅(X)] (Expected Shortfall: the mean loss in the worst 5% of paths, so CVaR ≥ VaR by construction)
    - P(loss) = share of paths with V_T < V₀
 
+### Portfolio optimization (Markowitz MPT)
+
+1. **Inputs.** The optimizer uses the same date-aligned USD log-returns as the Monte Carlo engine. The annualized mean is μ = 252 · mean(ℓ) and the covariance is Σ = 252 · cov(ℓ). When Σ is singular, the Cholesky jitter fallback is added to it.
+2. **Candidates.** Long-only weights live on the simplex {w ≥ 0, Σw = 1}. Half the samples are Dirichlet(1), which is uniform on the simplex. The other half are Dirichlet(0.3), which pushes weight toward the edges and corners, where constrained optima usually sit.
+3. **Anchors.** The current allocation, every 100% single-asset corner and equal weight are always included. As a result, the min-volatility portfolio is never riskier than the current one, and the max-Sharpe portfolio never has a lower Sharpe ratio.
+4. **Scoring.** For every candidate, return = wᵀμ, volatility = √(wᵀΣw) and Sharpe = (return − 4%) / volatility. All candidates are scored at once in a single vectorized `einsum`.
+5. **Efficient frontier.** Candidates are sorted by volatility, and a point is kept if its return beats every lower-risk point (the non-dominated upper envelope). The frontier is thinned to at most 60 points. The scatter cloud is an evenly spaced subset of about 300 candidates.
+6. **Rebalancing.** For each holding, Δwᵢ = target − current and the trade is Δwᵢ × total USD value. Trades sum to zero, so the plan is self-financing. Changes under 0.05 percentage points are reported as `HOLD`.
+
+Sampling instead of an exact quadratic-programming solver keeps the backend dependencies to NumPy alone. With 4,000 samples and a handful of holdings, the result lands within about 1 percentage point of the analytic optimum. The tests check the two-asset minimum-variance weight against the closed form w₁ = (σ₂² − σ₁₂) / (σ₁² + σ₂² − 2σ₁₂).
+
+Mean returns estimated from 90 days are noisy, so the max-Sharpe portfolio often concentrates in whichever asset rallied recently. This is the classic estimation-error weakness of MPT, and it's why the min-volatility target is offered alongside it.
+
 ### Stress testing
 
 Each holding's USD value is multiplied by (1 + equity shock) ÷ (1 + FX shock). The equity shock is the US or BIST shock, chosen by the `.IS` suffix. The FX shock (USD/TRY % change) applies only to TRY-denominated holdings, so a +25% USD/TRY move alone costs a lira asset 1 − 1/1.25 = 20% in USD. The presets are hypothetical shocks loosely calibrated to past episodes: COVID-19 (Feb–Mar 2020), the 2022 tech de-rating, the Aug 2018 lira crisis, and a surprise Fed tightening.
@@ -241,6 +257,17 @@ pytest -v
 - `tests/test_risk_engine.py`: volatility, VaR, max drawdown and Sharpe against closed-form values; risk-score bounds, weighting and re-normalization; sentiment classification; P&L and daily-move flags.
 - `tests/test_correlation_benchmark.py`: cross-market date alignment, Pearson correlation (±1, hand-calculated, zero-variance and too-few-observation cases), pair ranking, benchmark selection, rebasing, beta and windowing.
 - `tests/test_simulation.py`: log-returns and FX conversion; Cholesky on positive-definite, perfectly collinear, linear-combination and zero-variance single-asset matrices; seeded determinism; zero-volatility paths matching the closed form; ρ = ±1 transmission through the Cholesky factor; antithetic mirroring; ordered percentile bands; the zero-drift martingale; hand-calculated VaR/CVaR and the CVaR ≥ VaR invariant; every stress preset, custom FX shocks on `.IS` holdings and input validation; plus API tests for both endpoints.
+- `tests/test_optimizer.py` covers:
+  - annualization and singular-covariance regularization;
+  - simplex sampling (non-negative weights that sum to 1, anchors, seeded);
+  - hand-calculated return, volatility and Sharpe;
+  - efficient-frontier dominance and thinning;
+  - seeded determinism;
+  - `min_volatility ≤ current` and `max_sharpe ≥ min_volatility`;
+  - the closed-form two-asset minimum-variance weight;
+  - single-asset and collinear portfolios;
+  - self-financing rebalancing;
+  - the `/api/portfolio/optimize` endpoint.
 - `tests/test_api.py`: full CRUD, correlation and benchmark endpoints, validation (`409` / `404` / `422`), stock history and alert deduplication, using an in-memory SQLite database and a deterministic fake market data provider.
 
 ```bash

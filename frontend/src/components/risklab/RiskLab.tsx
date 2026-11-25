@@ -2,6 +2,7 @@ import { ChevronDown, FlaskConical } from "lucide-react";
 import { useState } from "react";
 
 import { MonteCarloPanel } from "./MonteCarloPanel";
+import { OptimizerPanel } from "./OptimizerPanel";
 import { StressTestPanel } from "./StressTestPanel";
 
 const STORAGE_KEY = "finpulse.riskLab.open";
@@ -42,7 +43,7 @@ export function RiskLab({ refreshKey }: { refreshKey: unknown }) {
           <span id="risk-lab-title" className="panel-title text-zinc-300">
             Risk Lab
           </span>
-          <span className="text-[11px] text-zinc-500">Monte Carlo simulation &amp; stress testing</span>
+          <span className="text-[11px] text-zinc-500">Monte Carlo · Stress testing · Portfolio optimization</span>
         </span>
         <ChevronDown className={`h-4 w-4 text-zinc-500 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
@@ -54,6 +55,9 @@ export function RiskLab({ refreshKey }: { refreshKey: unknown }) {
           </div>
           <div className="min-w-0 xl:col-span-5">
             <StressTestPanel refreshKey={refreshKey} />
+          </div>
+          <div className="min-w-0 xl:col-span-12">
+            <OptimizerPanel refreshKey={refreshKey} />
           </div>
         </div>
       )}

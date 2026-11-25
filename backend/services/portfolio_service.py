@@ -12,21 +12,29 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+from numpy.typing import NDArray
 
 from models import WatchlistItem
 from schemas import (
+    AssetMomentsOut,
     BenchmarkOut,
     BenchmarkPointOut,
     CorrelationOut,
     CorrelationPairOut,
+    FrontierPointOut,
     HeadlineOut,
     MonteCarloBandOut,
     MonteCarloOut,
+    OptimizationOut,
     PortfolioOut,
+    PortfolioPointOut,
     PortfolioSummaryOut,
     PositionOut,
     PricePointOut,
     QuantMetricsOut,
+    RebalanceAction,
+    RebalanceRowOut,
+    RebalancingOut,
     ScenarioOut,
     SentimentOut,
     SimulatedHoldingOut,
@@ -34,6 +42,7 @@ from schemas import (
     StressImpactOut,
     StressTestOut,
     StressTestRequest,
+    WeightOut,
 )
 from services.market_service import MarketService, NewsHeadline, PricePoint
 from services.monte_carlo import (
@@ -46,6 +55,7 @@ from services.monte_carlo import (
 )
 from services.risk_engine import (
     HIGH_CORRELATION_THRESHOLD,
+    RISK_FREE_RATE_ANNUAL,
     TRADING_DAYS_PER_YEAR,
     QuantMetrics,
     SentimentSummary,
@@ -63,6 +73,7 @@ from services.risk_engine import (
     classify_risk_level,
     compute_quant_metrics,
 )
+from services.optimizer import DEFAULT_SAMPLES, PortfolioPoint, PortfolioStats, optimize_portfolio
 from services.stress_test import PRESET_SCENARIOS, Holding, ScenarioDefinition, ShockSet, run_stress_test
 
 MAX_PARALLEL_FETCHES = 8
@@ -390,22 +401,28 @@ def _fx_symbol(currency: str | None) -> str | None:
     return None if code == "USD" else f"{code}=X"
 
 
-def build_monte_carlo(
-    items: list[WatchlistItem],
-    market: MarketService,
-    horizon_days: int,
-    simulations: int,
-    seed: int | None = None,
-    drift_model: DriftModel = DriftModel.HISTORICAL,
-) -> MonteCarloOut:
-    """Correlated GBM simulation of total portfolio value in USD.
+@dataclass(frozen=True)
+class UsdReturns:
+    """Date-aligned USD log-returns of every priced holding with history."""
+
+    symbols: list[str]
+    values_usd: NDArray[np.float64]  # current market value per symbol
+    dates: list[str]  # aligned price dates (one more than returns rows)
+    returns: NDArray[np.float64]  # (observations, symbols)
+    fx_adjusted: dict[str, bool]
+    excluded_symbols: list[str]
+
+
+def _usd_log_returns(items: list[WatchlistItem], market: MarketService) -> UsdReturns:
+    """Shared input for the Monte Carlo engine and the optimiser.
 
     Non-USD holdings are converted to USD with the daily ``<CCY>=X`` close, so
-    simulated returns include currency risk. When no FX history is available a
-    holding falls back to local-currency returns (``fx_adjusted=False``).
+    returns include currency risk. When no FX history is available a holding
+    falls back to local-currency returns (``fx_adjusted=False``). Holdings
+    without a price, FX rate or history are excluded.
 
-    Raises ``InsufficientDataError`` when fewer than
-    ``MIN_SIMULATION_OBSERVATIONS`` aligned returns are available.
+    Raises ``InsufficientDataError`` below ``MIN_SIMULATION_OBSERVATIONS``
+    aligned returns.
     """
     valuations = _value_holdings(items, market)
     priced = [v for v in valuations if v.value_usd is not None and v.value_usd > 0]
@@ -415,7 +432,7 @@ def build_monte_carlo(
 
     series: dict[str, list[tuple[str, float]]] = {}
     fx_adjusted: dict[str, bool] = {}
-    initial_by_symbol: dict[str, float] = {}
+    value_by_symbol: dict[str, float] = {}
     for v in priced:
         prices = _as_pairs(histories[v.symbol])
         if not prices or v.value_usd is None:
@@ -426,17 +443,41 @@ def build_monte_carlo(
             prices = convert_to_usd(prices, fx_history)
         series[v.symbol] = prices
         fx_adjusted[v.symbol] = fx is None or bool(fx_history)
-        initial_by_symbol[v.symbol] = v.value_usd
+        value_by_symbol[v.symbol] = v.value_usd
 
     dates, matrix = align_prices(series)
     if not series or len(dates) - 1 < MIN_SIMULATION_OBSERVATIONS:
         raise InsufficientDataError(
-            f"Need at least {MIN_SIMULATION_OBSERVATIONS} date-aligned daily returns across priced holdings to simulate"
+            f"Need at least {MIN_SIMULATION_OBSERVATIONS} date-aligned daily returns across priced holdings"
         )
 
     symbols = list(series)
-    returns = log_returns(matrix)
-    initial = np.array([initial_by_symbol[s] for s in symbols])
+    return UsdReturns(
+        symbols=symbols,
+        values_usd=np.array([value_by_symbol[s] for s in symbols]),
+        dates=dates,
+        returns=log_returns(matrix),
+        fx_adjusted=fx_adjusted,
+        excluded_symbols=[v.symbol for v in valuations if v.symbol not in series],
+    )
+
+
+def build_monte_carlo(
+    items: list[WatchlistItem],
+    market: MarketService,
+    horizon_days: int,
+    simulations: int,
+    seed: int | None = None,
+    drift_model: DriftModel = DriftModel.HISTORICAL,
+) -> MonteCarloOut:
+    """Correlated GBM simulation of total portfolio value in USD.
+
+    Raises ``InsufficientDataError`` when fewer than
+    ``MIN_SIMULATION_OBSERVATIONS`` aligned returns are available.
+    """
+    data = _usd_log_returns(items, market)
+    symbols, returns, dates, fx_adjusted = data.symbols, data.returns, data.dates, data.fx_adjusted
+    initial = data.values_usd
     result = run_monte_carlo(initial, returns, horizon_days, simulations, seed, drift_model)
     summary = result.summary
     total = summary.initial_value
@@ -484,7 +525,107 @@ def build_monte_carlo(
             )
             for day, column in enumerate(result.paths_percentiles.T)
         ],
-        excluded_symbols=[v.symbol for v in valuations if v.symbol not in series],
+        excluded_symbols=data.excluded_symbols,
+    )
+
+
+REBALANCE_TOLERANCE_PCT = 0.05  # weight changes below this are reported as HOLD
+
+
+def _weights_out(symbols: list[str], weights: NDArray[np.float64]) -> list[WeightOut]:
+    return [WeightOut(symbol=s, weight_pct=round(float(w) * 100, 2)) for s, w in zip(symbols, weights, strict=True)]
+
+
+def _point_out(symbols: list[str], point: PortfolioPoint) -> PortfolioPointOut:
+    return PortfolioPointOut(
+        expected_return_pct=round(point.expected_return * 100, 2),
+        volatility_pct=round(point.volatility * 100, 2),
+        sharpe_ratio=None if point.sharpe is None else round(point.sharpe, 3),
+        weights=_weights_out(symbols, point.weights),
+    )
+
+
+def _frontier_out(stats: PortfolioStats) -> list[FrontierPointOut]:
+    return [
+        FrontierPointOut(
+            expected_return_pct=round(float(r) * 100, 2),
+            volatility_pct=round(float(v) * 100, 2),
+            sharpe_ratio=round(float(s), 3) if math.isfinite(s) else None,
+        )
+        for r, v, s in zip(stats.returns, stats.volatility, stats.sharpe, strict=True)
+    ]
+
+
+def rebalancing_plan(
+    symbols: list[str],
+    current: NDArray[np.float64],
+    target: NDArray[np.float64],
+    total_value_usd: float,
+) -> list[RebalanceRowOut]:
+    """Per-symbol weight change and the USD trade needed to reach ``target``."""
+    rows: list[RebalanceRowOut] = []
+    for symbol, cur, tgt in zip(symbols, current, target, strict=True):
+        delta = float(tgt - cur)
+        delta_pct = delta * 100
+        if abs(delta_pct) < REBALANCE_TOLERANCE_PCT:
+            action = RebalanceAction.HOLD
+        else:
+            action = RebalanceAction.BUY if delta > 0 else RebalanceAction.SELL
+        rows.append(
+            RebalanceRowOut(
+                symbol=symbol,
+                current_weight_pct=round(float(cur) * 100, 2),
+                target_weight_pct=round(float(tgt) * 100, 2),
+                delta_weight_pct=round(delta_pct, 2),
+                delta_usd=round(delta * total_value_usd, 2),
+                action=action,
+            )
+        )
+    return rows
+
+
+def build_optimization(
+    items: list[WatchlistItem],
+    market: MarketService,
+    samples: int = DEFAULT_SAMPLES,
+    seed: int | None = None,
+) -> OptimizationOut:
+    """Markowitz long-only optimisation of the current holdings (USD returns)."""
+    data = _usd_log_returns(items, market)
+    total = float(data.values_usd.sum())
+    current_weights = data.values_usd / total
+    result = optimize_portfolio(current_weights, data.returns, samples, seed)
+    symbols = data.symbols
+    asset_vol = np.sqrt(np.diag(result.moments.covariance))
+
+    return OptimizationOut(
+        samples=result.samples,
+        seed=seed,
+        risk_free_rate_pct=RISK_FREE_RATE_ANNUAL * 100,
+        observations=int(data.returns.shape[0]),
+        start_date=data.dates[0],
+        end_date=data.dates[-1],
+        covariance_jitter=result.moments.jitter,
+        total_value_usd=round(total, 2),
+        assets=[
+            AssetMomentsOut(
+                symbol=s,
+                value_usd=round(float(data.values_usd[i]), 2),
+                expected_return_pct=round(float(result.moments.mean[i]) * 100, 2),
+                volatility_pct=round(float(asset_vol[i]) * 100, 2),
+            )
+            for i, s in enumerate(symbols)
+        ],
+        current_portfolio=_point_out(symbols, result.current),
+        max_sharpe=_point_out(symbols, result.max_sharpe),
+        min_volatility=_point_out(symbols, result.min_volatility),
+        frontier_cloud=_frontier_out(result.cloud),
+        efficient_frontier=_frontier_out(result.frontier),
+        rebalancing=RebalancingOut(
+            max_sharpe=rebalancing_plan(symbols, result.current.weights, result.max_sharpe.weights, total),
+            min_volatility=rebalancing_plan(symbols, result.current.weights, result.min_volatility.weights, total),
+        ),
+        excluded_symbols=data.excluded_symbols,
     )
 
 

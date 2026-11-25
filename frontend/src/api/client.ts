@@ -5,6 +5,7 @@ import type {
   DriftModel,
   MonteCarloResult,
   NewPosition,
+  OptimizationResult,
   Portfolio,
   RiskAlert,
   StockDetail,
@@ -96,7 +97,13 @@ export const api = {
     return request<MonteCarloResult>(`/api/portfolio/monte-carlo?${query}`, { signal });
   },
 
-  getStressScenarios: (signal?: AbortSignal) =>
+  getOptimization: (samples: number, seed: number | null, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ samples: String(samples) });
+    if (seed != null) query.set("seed", String(seed));
+    return request<OptimizationResult>(`/api/portfolio/optimize?${query}`, { signal });
+  },
+
+  getStressScenarios:(signal?: AbortSignal) =>
     request<StressScenario[]>("/api/portfolio/stress-test/scenarios", { signal }),
 
   runStressTest: (payload: StressTestRequest, signal?: AbortSignal) =>

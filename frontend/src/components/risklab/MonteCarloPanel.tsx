@@ -222,7 +222,7 @@ export function MonteCarloPanel({ refreshKey }: { refreshKey: unknown }) {
   );
 
   return (
-    <section className="panel flex min-w-0 flex-col">
+    <section className="panel flex h-full min-w-0 flex-col">
       <header className="panel-header flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <h3 className="panel-title">Monte Carlo · Correlated GBM</h3>

@@ -237,6 +237,61 @@ export interface StressTestResult extends StressShocks {
   excluded_symbols: string[];
 }
 
+export type RebalanceAction = "BUY" | "SELL" | "HOLD";
+
+export interface PortfolioWeight {
+  symbol: string;
+  weight_pct: number;
+}
+
+export interface FrontierPoint {
+  expected_return_pct: number;
+  volatility_pct: number;
+  sharpe_ratio: number | null;
+}
+
+export interface OptimalPortfolio extends FrontierPoint {
+  weights: PortfolioWeight[];
+}
+
+export interface AssetMoments {
+  symbol: string;
+  value_usd: number;
+  expected_return_pct: number;
+  volatility_pct: number;
+}
+
+export interface RebalanceRow {
+  symbol: string;
+  current_weight_pct: number;
+  target_weight_pct: number;
+  delta_weight_pct: number;
+  /** Positive = buy, negative = sell. */
+  delta_usd: number;
+  action: RebalanceAction;
+}
+
+export type OptimizationTarget = "max_sharpe" | "min_volatility";
+
+export interface OptimizationResult {
+  samples: number;
+  seed: number | null;
+  risk_free_rate_pct: number;
+  observations: number;
+  start_date: string;
+  end_date: string;
+  covariance_jitter: number;
+  total_value_usd: number;
+  assets: AssetMoments[];
+  current_portfolio: OptimalPortfolio;
+  max_sharpe: OptimalPortfolio;
+  min_volatility: OptimalPortfolio;
+  frontier_cloud: FrontierPoint[];
+  efficient_frontier: FrontierPoint[];
+  rebalancing: Record<OptimizationTarget, RebalanceRow[]>;
+  excluded_symbols: string[];
+}
+
 export interface NewPosition {
   symbol: string;
   shares: number;

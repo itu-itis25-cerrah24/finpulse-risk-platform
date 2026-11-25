@@ -17,6 +17,7 @@ from schemas import (
     BenchmarkOut,
     CorrelationOut,
     MonteCarloOut,
+    OptimizationOut,
     PortfolioOut,
     ScenarioOut,
     StockHistoryOut,
@@ -29,12 +30,14 @@ from seed import seed_default_watchlist
 from services.alert_service import refresh_alerts
 from services.market_service import HISTORY_LOOKBACK_DAYS, MarketService, market_service
 from services.monte_carlo import DriftModel
+from services.optimizer import DEFAULT_SAMPLES
 from services.portfolio_service import (
     BenchmarkUnavailableError,
     InsufficientDataError,
     build_benchmark_comparison,
     build_correlation,
     build_monte_carlo,
+    build_optimization,
     build_portfolio,
     build_stock_detail,
     build_stress_test,
@@ -47,6 +50,7 @@ DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://local
 CORS_ORIGINS = [o.strip() for o in os.getenv("FINPULSE_CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",") if o.strip()]
 MAX_SIMULATION_HORIZON_DAYS = 252  # one trading year
 MAX_SIMULATIONS = 5000  # bounds CPU time per request
+MAX_OPTIMIZER_SAMPLES = 20000
 
 
 @asynccontextmanager
@@ -124,6 +128,20 @@ def get_portfolio_monte_carlo(
     """Correlated GBM (Cholesky) simulation of portfolio USD value: percentile bands, VaR, CVaR, P(loss)."""
     try:
         return build_monte_carlo(_load_watchlist(db), market, days, simulations, seed, drift)
+    except InsufficientDataError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+
+@app.get("/api/portfolio/optimize", response_model=OptimizationOut, tags=["risk-lab"])
+def get_portfolio_optimization(
+    samples: int = Query(DEFAULT_SAMPLES, ge=100, le=MAX_OPTIMIZER_SAMPLES, description="Candidate portfolios to evaluate"),
+    seed: int | None = Query(None, ge=0, description="Random seed for reproducible results"),
+    db: Session = Depends(get_db),
+    market: MarketService = Depends(get_market_service),
+) -> OptimizationOut:
+    """Markowitz long-only optimisation: efficient frontier, max-Sharpe and min-volatility portfolios, rebalancing."""
+    try:
+        return build_optimization(_load_watchlist(db), market, samples, seed)
     except InsufficientDataError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
