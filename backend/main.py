@@ -16,26 +16,37 @@ from schemas import (
     AlertOut,
     BenchmarkOut,
     CorrelationOut,
+    MonteCarloOut,
     PortfolioOut,
+    ScenarioOut,
     StockHistoryOut,
+    StressTestOut,
+    StressTestRequest,
     WatchlistCreate,
     WatchlistItemOut,
 )
 from seed import seed_default_watchlist
 from services.alert_service import refresh_alerts
 from services.market_service import HISTORY_LOOKBACK_DAYS, MarketService, market_service
+from services.monte_carlo import DriftModel
 from services.portfolio_service import (
     BenchmarkUnavailableError,
+    InsufficientDataError,
     build_benchmark_comparison,
     build_correlation,
+    build_monte_carlo,
     build_portfolio,
     build_stock_detail,
+    build_stress_test,
+    list_scenarios,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
 CORS_ORIGINS = [o.strip() for o in os.getenv("FINPULSE_CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",") if o.strip()]
+MAX_SIMULATION_HORIZON_DAYS = 252  # one trading year
+MAX_SIMULATIONS = 5000  # bounds CPU time per request
 
 
 @asynccontextmanager
@@ -99,6 +110,38 @@ def get_portfolio_correlation(
 ) -> CorrelationOut:
     """Pairwise Pearson correlation of date-aligned 90-day daily returns."""
     return build_correlation(_load_watchlist(db), market)
+
+
+@app.get("/api/portfolio/monte-carlo", response_model=MonteCarloOut, tags=["risk-lab"])
+def get_portfolio_monte_carlo(
+    days: int = Query(90, ge=1, le=MAX_SIMULATION_HORIZON_DAYS, description="Horizon in trading days"),
+    simulations: int = Query(1000, ge=100, le=MAX_SIMULATIONS, description="Number of simulated paths"),
+    seed: int | None = Query(None, ge=0, description="Random seed for reproducible results"),
+    drift: DriftModel = Query(DriftModel.HISTORICAL, description="historical mean log-return, or zero drift"),
+    db: Session = Depends(get_db),
+    market: MarketService = Depends(get_market_service),
+) -> MonteCarloOut:
+    """Correlated GBM (Cholesky) simulation of portfolio USD value: percentile bands, VaR, CVaR, P(loss)."""
+    try:
+        return build_monte_carlo(_load_watchlist(db), market, days, simulations, seed, drift)
+    except InsufficientDataError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+
+@app.get("/api/portfolio/stress-test/scenarios", response_model=list[ScenarioOut], tags=["risk-lab"])
+def get_stress_scenarios() -> list[ScenarioOut]:
+    """Preset crisis scenarios and their factor shocks."""
+    return list_scenarios()
+
+
+@app.post("/api/portfolio/stress-test", response_model=StressTestOut, tags=["risk-lab"])
+def post_stress_test(
+    payload: StressTestRequest,
+    db: Session = Depends(get_db),
+    market: MarketService = Depends(get_market_service),
+) -> StressTestOut:
+    """Instantaneous USD revaluation of every holding under a preset or custom shock scenario."""
+    return build_stress_test(_load_watchlist(db), market, payload)
 
 
 @app.post(

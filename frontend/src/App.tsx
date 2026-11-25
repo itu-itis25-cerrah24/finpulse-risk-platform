@@ -15,6 +15,7 @@ import { useDashboard } from "./hooks/useDashboard";
 const StockDetailPanel = lazy(() =>
   import("./components/detail/StockDetailPanel").then((m) => ({ default: m.StockDetailPanel })),
 );
+const RiskLab = lazy(() => import("./components/risklab/RiskLab").then((m) => ({ default: m.RiskLab })));
 
 function LoadingSkeleton() {
   return (
@@ -133,6 +134,10 @@ export default function App() {
                 <AlertsFeed alerts={alerts} onSelectSymbol={setSelectedSymbol} />
               </aside>
             </div>
+
+            <Suspense fallback={<div className="panel h-[44px] animate-pulse" />}>
+              <RiskLab refreshKey={lastUpdated?.getTime()} />
+            </Suspense>
           </>
         )}
       </main>
@@ -140,7 +145,7 @@ export default function App() {
       <footer className="border-t border-zinc-900 px-4 py-3">
         <div className="num mx-auto flex max-w-[1680px] flex-wrap justify-between gap-2 text-[10px] text-zinc-600">
           <span>DATA: Yahoo Finance · 5-min server cache · 60s client refresh</span>
-          <span>VaR: historical 95% 1-day · Vol: σ√252 · Sharpe rf 4% · Sentiment: VADER</span>
+          <span>VaR: historical 95% 1-day · Vol: σ√252 · Sharpe rf 4% · MC: Cholesky GBM · Sentiment: VADER</span>
         </div>
       </footer>
 

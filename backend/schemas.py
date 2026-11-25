@@ -3,10 +3,12 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from services.alert_service import AlertSeverity, AlertType
+from services.monte_carlo import DriftModel
 from services.risk_engine import DailyRiskFlag, RiskLevel, SentimentLabel
+from services.stress_test import MarketSegment, Scenario
 
 # ---------------------------------------------------------------------------
 # Watchlist CRUD
@@ -188,6 +190,111 @@ class BenchmarkOut(BaseModel):
     beta: float | None
     correlation: float | None
     observations: int
+
+
+# ---------------------------------------------------------------------------
+# Risk Lab: Monte Carlo simulation
+# ---------------------------------------------------------------------------
+
+
+class MonteCarloBandOut(BaseModel):
+    day: int = Field(..., description="Trading days from today (0 = current value)")
+    p5: float
+    p25: float
+    p50: float
+    p75: float
+    p95: float
+
+
+class SimulatedHoldingOut(BaseModel):
+    symbol: str
+    value_usd: float
+    weight_pct: float
+    annualized_drift_pct: float = Field(..., description="Simulated daily log drift x 252")
+    annualized_volatility_pct: float
+    fx_adjusted: bool = Field(..., description="Returns measured in USD (includes currency moves)")
+
+
+class MonteCarloOut(BaseModel):
+    horizon_days: int
+    simulations: int
+    seed: int | None
+    drift_model: DriftModel
+    confidence: float
+    observations: int = Field(..., description="Date-aligned daily log-returns used for estimation")
+    start_date: str
+    end_date: str
+    cholesky_jitter: float = Field(..., description="Diagonal ridge added to make the covariance factorisable")
+    holdings: list[SimulatedHoldingOut]
+    initial_value: float
+    expected_value: float
+    median_value: float
+    expected_return_pct: float
+    var_95_simulated: float = Field(..., description="95% horizon VaR in USD (positive = loss)")
+    var_95_pct: float
+    cvar_95_simulated: float = Field(..., description="95% Expected Shortfall in USD (>= VaR)")
+    cvar_95_pct: float
+    probability_of_loss_pct: float
+    bands: list[MonteCarloBandOut]
+    excluded_symbols: list[str] = Field(default_factory=list, description="No live price, FX rate or history")
+
+
+# ---------------------------------------------------------------------------
+# Risk Lab: stress testing
+# ---------------------------------------------------------------------------
+
+SHOCK_FIELDS = ("us_equity_shock_pct", "bist_equity_shock_pct", "usd_try_shock_pct")
+
+
+class StressTestRequest(BaseModel):
+    """Either a preset ``scenario`` or any combination of custom shocks (default 0)."""
+
+    scenario: Scenario | None = None
+    us_equity_shock_pct: float = Field(0.0, ge=-100, le=100)
+    bist_equity_shock_pct: float = Field(0.0, ge=-100, le=100)
+    usd_try_shock_pct: float = Field(0.0, gt=-100, le=300, description="% change in TRY per USD")
+
+    @model_validator(mode="after")
+    def preset_or_custom(self) -> "StressTestRequest":
+        if self.scenario is not None and self.model_fields_set.intersection(SHOCK_FIELDS):
+            raise ValueError("Provide either a preset scenario or custom shocks, not both")
+        return self
+
+
+class ScenarioOut(BaseModel):
+    key: Scenario
+    label: str
+    description: str
+    us_equity_shock_pct: float
+    bist_equity_shock_pct: float
+    usd_try_shock_pct: float
+
+
+class StressImpactOut(BaseModel):
+    symbol: str
+    segment: MarketSegment
+    currency: str | None
+    value_before_usd: float
+    value_after_usd: float
+    pnl_usd: float
+    pnl_pct: float
+    equity_shock_pct: float
+    fx_shock_pct: float
+
+
+class StressTestOut(BaseModel):
+    scenario: Scenario | None
+    label: str
+    us_equity_shock_pct: float
+    bist_equity_shock_pct: float
+    usd_try_shock_pct: float
+    positions: list[StressImpactOut]
+    total_before_usd: float
+    total_after_usd: float
+    total_pnl_usd: float
+    total_pnl_pct: float | None
+    worst_hit_symbol: str | None
+    excluded_symbols: list[str] = Field(default_factory=list, description="No live price or FX rate")
 
 
 # ---------------------------------------------------------------------------

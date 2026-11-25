@@ -2,11 +2,23 @@ import { API_BASE_URL } from "../config";
 import type {
   BenchmarkComparison,
   CorrelationMatrix,
+  DriftModel,
+  MonteCarloResult,
   NewPosition,
   Portfolio,
   RiskAlert,
   StockDetail,
+  StressScenario,
+  StressTestRequest,
+  StressTestResult,
 } from "./types";
+
+export interface MonteCarloParams {
+  days: number;
+  simulations: number;
+  drift: DriftModel;
+  seed?: number | null;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -73,6 +85,22 @@ export const api = {
 
   getBenchmark: (symbol: string, days: number, signal?: AbortSignal) =>
     request<BenchmarkComparison>(`/api/stock/${encodeURIComponent(symbol)}/benchmark?days=${days}`, { signal }),
+
+  getMonteCarlo: (params: MonteCarloParams, signal?: AbortSignal) => {
+    const query = new URLSearchParams({
+      days: String(params.days),
+      simulations: String(params.simulations),
+      drift: params.drift,
+    });
+    if (params.seed != null) query.set("seed", String(params.seed));
+    return request<MonteCarloResult>(`/api/portfolio/monte-carlo?${query}`, { signal });
+  },
+
+  getStressScenarios: (signal?: AbortSignal) =>
+    request<StressScenario[]>("/api/portfolio/stress-test/scenarios", { signal }),
+
+  runStressTest: (payload: StressTestRequest, signal?: AbortSignal) =>
+    request<StressTestResult>("/api/portfolio/stress-test", { method: "POST", body: JSON.stringify(payload), signal }),
 
   // Alert rules are re-evaluated by GET /api/portfolio, so skip the duplicate work here.
   getAlerts: (limit = 50, signal?: AbortSignal) =>

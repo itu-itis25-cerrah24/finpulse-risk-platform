@@ -38,6 +38,38 @@
   }
 }
 
+/* Stress-test sliders: dark track (filled inline), thumb takes the slider's `color`. */
+.shock-range {
+  height: 4px;
+  cursor: pointer;
+  appearance: none;
+  border-radius: 9999px;
+  outline: none;
+}
+
+.shock-range::-webkit-slider-thumb {
+  width: 13px;
+  height: 13px;
+  appearance: none;
+  border: 2px solid #09090b;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+.shock-range::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border: 2px solid #09090b;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+.shock-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px #3f3f46;
+}
+
 /* Thin, unobtrusive scrollbars for dense terminal panels. */
 * {
   scrollbar-width: thin;

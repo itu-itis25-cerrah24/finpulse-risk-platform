@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
+
 from models import WatchlistItem
 from schemas import (
     BenchmarkOut,
@@ -18,19 +20,36 @@ from schemas import (
     CorrelationOut,
     CorrelationPairOut,
     HeadlineOut,
+    MonteCarloBandOut,
+    MonteCarloOut,
     PortfolioOut,
     PortfolioSummaryOut,
     PositionOut,
     PricePointOut,
     QuantMetricsOut,
+    ScenarioOut,
     SentimentOut,
+    SimulatedHoldingOut,
     StockHistoryOut,
+    StressImpactOut,
+    StressTestOut,
+    StressTestRequest,
 )
 from services.market_service import MarketService, NewsHeadline, PricePoint
+from services.monte_carlo import (
+    DEFAULT_CONFIDENCE,
+    MIN_SIMULATION_OBSERVATIONS,
+    DriftModel,
+    convert_to_usd,
+    log_returns,
+    run_monte_carlo,
+)
 from services.risk_engine import (
     HIGH_CORRELATION_THRESHOLD,
+    TRADING_DAYS_PER_YEAR,
     QuantMetrics,
     SentimentSummary,
+    align_prices,
     align_returns,
     analyze_headlines,
     average_pairwise_correlation,
@@ -44,6 +63,7 @@ from services.risk_engine import (
     classify_risk_level,
     compute_quant_metrics,
 )
+from services.stress_test import PRESET_SCENARIOS, Holding, ScenarioDefinition, ShockSet, run_stress_test
 
 MAX_PARALLEL_FETCHES = 8
 
@@ -320,4 +340,210 @@ def build_benchmark_comparison(symbol: str, window_days: int, market: MarketServ
         beta=comparison.beta,
         correlation=comparison.correlation,
         observations=comparison.observations,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Risk Lab: valuation, Monte Carlo, stress testing
+# ---------------------------------------------------------------------------
+
+
+class InsufficientDataError(Exception):
+    """Raised when no holding has enough priced history to simulate."""
+
+
+@dataclass(frozen=True)
+class HoldingValuation:
+    symbol: str
+    currency: str | None
+    value_usd: float | None
+
+
+def _value_holding(position: PositionInput, market: MarketService) -> HoldingValuation:
+    quote = market.get_quote(position.symbol)
+    if quote.price is None:
+        return HoldingValuation(position.symbol, quote.currency, None)
+    fx_rate = market.get_fx_rate_to_usd(quote.currency)
+    value = position.shares * quote.price * fx_rate if fx_rate is not None else None
+    return HoldingValuation(position.symbol, quote.currency, value)
+
+
+def _value_holdings(items: list[WatchlistItem], market: MarketService) -> list[HoldingValuation]:
+    """Current USD market value of every position (``None`` when price or FX is missing)."""
+    inputs = [PositionInput.from_model(item) for item in items]
+    if not inputs:
+        return []
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_FETCHES, len(inputs))) as pool:
+        return list(pool.map(lambda p: _value_holding(p, market), inputs))
+
+
+def _fetch_histories(symbols: list[str], market: MarketService) -> dict[str, list[PricePoint]]:
+    if not symbols:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_FETCHES, len(symbols))) as pool:
+        return dict(zip(symbols, pool.map(market.get_history, symbols), strict=True))
+
+
+def _fx_symbol(currency: str | None) -> str | None:
+    """Yahoo FX pair for a non-USD currency (``TRY`` -> ``TRY=X``), ``None`` for USD."""
+    code = (currency or "USD").upper()
+    return None if code == "USD" else f"{code}=X"
+
+
+def build_monte_carlo(
+    items: list[WatchlistItem],
+    market: MarketService,
+    horizon_days: int,
+    simulations: int,
+    seed: int | None = None,
+    drift_model: DriftModel = DriftModel.HISTORICAL,
+) -> MonteCarloOut:
+    """Correlated GBM simulation of total portfolio value in USD.
+
+    Non-USD holdings are converted to USD with the daily ``<CCY>=X`` close, so
+    simulated returns include currency risk. When no FX history is available a
+    holding falls back to local-currency returns (``fx_adjusted=False``).
+
+    Raises ``InsufficientDataError`` when fewer than
+    ``MIN_SIMULATION_OBSERVATIONS`` aligned returns are available.
+    """
+    valuations = _value_holdings(items, market)
+    priced = [v for v in valuations if v.value_usd is not None and v.value_usd > 0]
+
+    fx_symbols = sorted({fx for v in priced if (fx := _fx_symbol(v.currency)) is not None})
+    histories = _fetch_histories([v.symbol for v in priced] + fx_symbols, market)
+
+    series: dict[str, list[tuple[str, float]]] = {}
+    fx_adjusted: dict[str, bool] = {}
+    initial_by_symbol: dict[str, float] = {}
+    for v in priced:
+        prices = _as_pairs(histories[v.symbol])
+        if not prices or v.value_usd is None:
+            continue
+        fx = _fx_symbol(v.currency)
+        fx_history = _as_pairs(histories[fx]) if fx else []
+        if fx_history:
+            prices = convert_to_usd(prices, fx_history)
+        series[v.symbol] = prices
+        fx_adjusted[v.symbol] = fx is None or bool(fx_history)
+        initial_by_symbol[v.symbol] = v.value_usd
+
+    dates, matrix = align_prices(series)
+    if not series or len(dates) - 1 < MIN_SIMULATION_OBSERVATIONS:
+        raise InsufficientDataError(
+            f"Need at least {MIN_SIMULATION_OBSERVATIONS} date-aligned daily returns across priced holdings to simulate"
+        )
+
+    symbols = list(series)
+    returns = log_returns(matrix)
+    initial = np.array([initial_by_symbol[s] for s in symbols])
+    result = run_monte_carlo(initial, returns, horizon_days, simulations, seed, drift_model)
+    summary = result.summary
+    total = summary.initial_value
+
+    return MonteCarloOut(
+        horizon_days=horizon_days,
+        simulations=simulations,
+        seed=seed,
+        drift_model=drift_model,
+        confidence=DEFAULT_CONFIDENCE,
+        observations=int(returns.shape[0]),
+        start_date=dates[0],
+        end_date=dates[-1],
+        cholesky_jitter=result.jitter,
+        holdings=[
+            SimulatedHoldingOut(
+                symbol=symbol,
+                value_usd=round(float(initial[i]), 2),
+                weight_pct=round(float(initial[i]) / total * 100, 2),
+                annualized_drift_pct=round(float(result.drift[i]) * TRADING_DAYS_PER_YEAR * 100, 2),
+                annualized_volatility_pct=round(
+                    float(result.volatility[i]) * math.sqrt(TRADING_DAYS_PER_YEAR) * 100, 2
+                ),
+                fx_adjusted=fx_adjusted[symbol],
+            )
+            for i, symbol in enumerate(symbols)
+        ],
+        initial_value=round(total, 2),
+        expected_value=round(summary.expected_value, 2),
+        median_value=round(summary.median_value, 2),
+        expected_return_pct=round(summary.expected_return_pct, 2),
+        var_95_simulated=round(summary.var, 2),
+        var_95_pct=round(summary.var / total * 100, 2),
+        cvar_95_simulated=round(summary.cvar, 2),
+        cvar_95_pct=round(summary.cvar / total * 100, 2),
+        probability_of_loss_pct=round(summary.probability_of_loss_pct, 2),
+        bands=[
+            MonteCarloBandOut(
+                day=day,
+                p5=round(float(column[0]), 2),
+                p25=round(float(column[1]), 2),
+                p50=round(float(column[2]), 2),
+                p75=round(float(column[3]), 2),
+                p95=round(float(column[4]), 2),
+            )
+            for day, column in enumerate(result.paths_percentiles.T)
+        ],
+        excluded_symbols=[v.symbol for v in valuations if v.symbol not in series],
+    )
+
+
+def _scenario_out(definition: ScenarioDefinition) -> ScenarioOut:
+    return ScenarioOut(
+        key=definition.key,
+        label=definition.label,
+        description=definition.description,
+        us_equity_shock_pct=definition.shocks.us_equity_shock_pct,
+        bist_equity_shock_pct=definition.shocks.bist_equity_shock_pct,
+        usd_try_shock_pct=definition.shocks.usd_try_shock_pct,
+    )
+
+
+def list_scenarios() -> list[ScenarioOut]:
+    return [_scenario_out(definition) for definition in PRESET_SCENARIOS.values()]
+
+
+def build_stress_test(items: list[WatchlistItem], market: MarketService, request: StressTestRequest) -> StressTestOut:
+    """Revalue the portfolio in USD under a preset or custom set of shocks."""
+    if request.scenario is not None:
+        definition = PRESET_SCENARIOS[request.scenario]
+        shocks, label = definition.shocks, definition.label
+    else:
+        shocks = ShockSet(
+            us_equity_shock_pct=request.us_equity_shock_pct,
+            bist_equity_shock_pct=request.bist_equity_shock_pct,
+            usd_try_shock_pct=request.usd_try_shock_pct,
+        )
+        label = "Custom shocks"
+
+    valuations = _value_holdings(items, market)
+    holdings = [Holding(v.symbol, v.value_usd, v.currency) for v in valuations if v.value_usd is not None]
+    result = run_stress_test(holdings, shocks)
+
+    return StressTestOut(
+        scenario=request.scenario,
+        label=label,
+        us_equity_shock_pct=shocks.us_equity_shock_pct,
+        bist_equity_shock_pct=shocks.bist_equity_shock_pct,
+        usd_try_shock_pct=shocks.usd_try_shock_pct,
+        positions=[
+            StressImpactOut(
+                symbol=i.symbol,
+                segment=i.segment,
+                currency=i.currency,
+                value_before_usd=i.value_before_usd,
+                value_after_usd=i.value_after_usd,
+                pnl_usd=i.pnl_usd,
+                pnl_pct=i.pnl_pct,
+                equity_shock_pct=i.equity_shock_pct,
+                fx_shock_pct=i.fx_shock_pct,
+            )
+            for i in result.impacts
+        ],
+        total_before_usd=result.total_before_usd,
+        total_after_usd=result.total_after_usd,
+        total_pnl_usd=result.total_pnl_usd,
+        total_pnl_pct=result.total_pnl_pct,
+        worst_hit_symbol=result.worst_hit_symbol,
+        excluded_symbols=[v.symbol for v in valuations if v.value_usd is None],
     )

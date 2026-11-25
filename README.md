@@ -15,6 +15,8 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 | **Quant risk engine** | Vectorized NumPy computation of **Annualized Volatility** (σ × √252), **95% Historical VaR** (1-day, empirical 5th percentile), **Max Drawdown** (running-peak method) and **Sharpe Ratio** (4% risk-free rate) from 90 days of daily returns. Pure functions with no I/O, so every metric is unit-tested against hand-calculated values. |
 | **Portfolio correlation matrix** | Pairwise **Pearson correlation** of daily returns. Prices are first **inner-joined on common trading dates**, because BIST and NYSE holidays differ, so every return covers the same calendar interval for every symbol. Pairs above ρ = 0.70 are flagged as concentration risk in a hover-enabled heatmap. |
 | **Benchmark comparison** | Each stock can be overlaid on its benchmark (**SPY** for US equities, **XU100.IS** for BIST). Both series are rebased to **0% cumulative return** at the start of the selected 1M/2M/3M window, with excess return, **beta** (Cov/Var) and correlation shown alongside. |
+| **Correlated Monte Carlo simulation** | Thousands of **Geometric Brownian Motion** paths of total portfolio value in USD. Cross-asset correlation is preserved by colouring independent normal draws with the **Cholesky factor** of the historical log-return covariance; a scaled **diagonal jitter** fallback keeps singular matrices (collinear or single-asset books) factorisable. **Antithetic variates** cut sampling noise, and an optional **seed** makes every run reproducible. Output: p5/p25/p50/p75/p95 fan bands plus simulated **VaR, CVaR (Expected Shortfall)** and probability of loss. |
+| **Stress testing** | Instant USD revaluation under preset crises (COVID crash, tech selloff, lira crisis, Fed hike) or custom US-equity / BIST-equity / USD-TRY shocks. Lira holdings take both the equity and the **currency-translation** hit. The UI sliders reprice the book live (debounced). |
 | **Composite risk score (0–100)** | Weighted blend of volatility, VaR, drawdown, daily move and news sentiment. Each factor is scaled against a "maximum risk" cap, and weights are **re-normalized when a factor is unavailable**, so a missing news feed never skews the score. |
 | **NLP sentiment** | VADER scores every headline (`BULLISH` / `BEARISH` / `NEUTRAL` at ±0.05 compound), then aggregates per symbol. |
 | **5-minute TTL caching** | A thread-safe `cachetools.TTLCache` wraps every Yahoo Finance call. Repeat dashboard loads drop from ~5.7 s to ~6 ms. Failed lookups are deliberately **not cached**, so the next request retries. |
@@ -22,7 +24,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 | **Thread-safe alert deduplication** | Alert rules (sharp drop/spike, high risk score, bearish news, deep drawdown) are pure functions. Persistence uses a check-then-insert under a lock, so concurrent refreshes (multiple tabs, React StrictMode) never store the same alert twice in one day. |
 | **Concurrent data fetching** | Positions are analyzed in parallel with a `ThreadPoolExecutor`, since the work is network-bound. |
 | **Graceful degradation** | Missing prices, empty news or upstream outages return well-defined fallbacks instead of 500s. The UI shows `NO DATA` or an offline state. |
-| **68 automated tests + CI** | `pytest` suite covering every quant metric, correlation, date alignment, beta and benchmark rebasing, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). **GitHub Actions** runs the backend tests and the strict TypeScript check and production build on every push and pull request to `main`. |
+| **123 automated tests + CI** | `pytest` suite covering every quant metric, correlation, date alignment, beta and benchmark rebasing, seeded Monte Carlo determinism, the Cholesky fallback, the CVaR ≥ VaR invariant, every stress scenario, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). **GitHub Actions** runs the backend tests and the strict TypeScript check and production build on every push and pull request to `main`. |
 
 ---
 
@@ -62,7 +64,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 ```
  ┌──────────────────────────────────────────────────────────────────────┐
  │  Browser — React + TypeScript SPA                                    │
- │  KPI bar · Positions table · Deep-dive chart · News · Alerts feed    │
+ │  KPI bar · Positions · Deep dive · Correlation · Alerts · Risk Lab   │
  └───────────────────────────────┬──────────────────────────────────────┘
                                  │  same-origin  /api/*
  ┌───────────────────────────────▼──────────────────────────────────────┐
@@ -73,6 +75,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
  │  FastAPI (backend container)                     main.py · schemas   │
  │                                                                      │
  │   portfolio_service ──► risk_engine (NumPy · VADER, pure functions)  │
+ │          │         ──► monte_carlo · stress_test (pure NumPy)         │
  │          │                                                           │
  │          ├──────────► market_service ──► TTLCache (5 min, locked)    │
  │          │                   │                                       │
@@ -100,15 +103,18 @@ finpulse-risk-platform/
 │   ├── services/
 │   │   ├── market_service.py   # yfinance facade + TTL cache + FX
 │   │   ├── risk_engine.py      # Volatility, VaR, drawdown, Sharpe, sentiment, score
+│   │   ├── monte_carlo.py      # Correlated GBM, Cholesky + jitter, VaR/CVaR
+│   │   ├── stress_test.py      # Preset & custom factor-shock scenarios
 │   │   ├── portfolio_service.py# Orchestration + USD aggregation
 │   │   └── alert_service.py    # Alert rules + deduplicated persistence
-│   ├── tests/                  # 68 pytest tests
+│   ├── tests/                  # 123 pytest tests
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
 │   │   ├── api/                # Typed client + response types
-│   │   ├── hooks/              # useDashboard, useStockDetail
-│   │   ├── components/         # KPI bar, table, deep dive, alerts, modal
+│   │   ├── hooks/              # useDashboard, useStockDetail, useApiResource
+│   │   ├── components/         # KPI bar, table, deep dive, heatmap, alerts, modal
+│   │   │   └── risklab/        # Monte Carlo fan chart + stress-test simulator
 │   │   └── lib/format.ts       # Number/currency formatting, semantic colors
 │   ├── nginx.conf
 │   └── Dockerfile
@@ -148,7 +154,7 @@ python -m venv .venv
 # Windows:  .\.venv\Scripts\Activate.ps1
 # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-pytest                                   # 68 tests
+pytest                                   # 123 tests
 uvicorn main:app --reload --port 8000
 ```
 
@@ -183,6 +189,9 @@ On first startup the backend seeds a demo portfolio of `THYAO.IS`, `ASELS.IS`, `
 | `POST` | `/api/portfolio` | Add a position `{symbol, shares, avg_cost, risk_threshold_pct}`. Validates the ticker against live data. Returns `201`, or `409` for a duplicate and `404` for an unknown symbol. |
 | `DELETE` | `/api/portfolio/{item_id}` | Remove a position. Returns `204`, or `404` if not found. |
 | `GET` | `/api/portfolio/correlation` | Pearson correlation matrix of date-aligned 90-day daily returns, average pairwise ρ, and pairs above 0.70 (concentration risk). |
+| `GET` | `/api/portfolio/monte-carlo?days=90&simulations=1000&seed=42&drift=historical` | Correlated GBM simulation of total USD value: daily p5/p25/p50/p75/p95 bands, expected value and return, simulated 95% VaR and CVaR, probability of loss. `days` 1–252, `simulations` 100–5000, `drift` `historical` or `zero`. Returns `422` if fewer than 5 aligned returns exist. |
+| `GET` | `/api/portfolio/stress-test/scenarios` | Preset crisis scenarios and their shocks. |
+| `POST` | `/api/portfolio/stress-test` | Body `{"scenario": "covid_crash" \| "tech_selloff" \| "usd_try_spike" \| "rate_hike"}` **or** custom `{us_equity_shock_pct, bist_equity_shock_pct, usd_try_shock_pct}` (mixing both is a `422`). Returns per-holding and total USD value before/after, P&L in USD and %, and the worst-hit position. |
 | `GET` | `/api/stock/{symbol}/history` | 90-day closing prices, sentiment-scored headlines, quant metrics and risk score for any symbol. |
 | `GET` | `/api/stock/{symbol}/benchmark?days=90` | Cumulative % return of the symbol vs SPY (or XU100.IS for `.IS` symbols), rebased to 0% at the window start, plus excess return, beta and correlation. Returns `503` if benchmark data is unavailable. |
 | `GET` | `/api/alerts?limit=50&refresh=true` | Most recent risk alerts, newest first, with severity `LOW` / `MEDIUM` / `HIGH` / `CRITICAL`. |
@@ -205,6 +214,21 @@ On first startup the backend seeds a demo portfolio of `THYAO.IS`, `ASELS.IS`, `
 | Risk score | 30% volatility (cap 60%) · 25% VaR (cap 5%) · 20% drawdown (cap 40%) · 10% daily move (cap 10%) · 15% sentiment |
 | Risk level | `LOW` < 35 ≤ `MODERATE` < 65 ≤ `HIGH` |
 
+### Monte Carlo simulation (correlated GBM)
+
+1. **USD log-returns.** Non-USD prices are divided by the same-day `<CCY>=X` close (e.g. `TRY=X`), so a BIST holding carries lira risk. Series are inner-joined by date, then ℓₜ = ln(Pₜ / Pₜ₋₁).
+2. **Parameters.** The drift is m = mean(ℓ) (GBM's μ − ½σ² term) and the covariance is Σ = cov(ℓ). With `drift=zero`, m = −½·diag(Σ), so E[Sₜ] = S₀ and only dispersion remains. This is useful because a 90-day mean extrapolated over 180 days can be extreme.
+3. **Cholesky.** Factor Σ = L Lᵀ. If Σ is only positive semi-definite (collinear holdings, zero variance, more assets than observations), add εI with ε = 10⁻¹⁰ · mean(diag Σ) and grow it tenfold until the factorisation succeeds. The jitter used is returned in the response.
+4. **Paths.** For each day: ln Sₜ₊₁ = ln Sₜ + m + L z with z ~ N(0, I). Because Cov(L z) = L Lᵀ = Σ, the shocks keep the historical correlations. Each z is paired with −z (antithetic variates). Portfolio value = Σᵢ Vᵢ,₀ · exp(cumulative log growth).
+5. **Risk measures** on the horizon P&L (X = V_T − V₀):
+   - VaR₉₅ = −q₀.₀₅(X)
+   - CVaR₉₅ = −E[X | X ≤ q₀.₀₅(X)] (Expected Shortfall: the mean loss in the worst 5% of paths, so CVaR ≥ VaR by construction)
+   - P(loss) = share of paths with V_T < V₀
+
+### Stress testing
+
+Each holding's USD value is multiplied by (1 + equity shock) ÷ (1 + FX shock). The equity shock is the US or BIST shock, chosen by the `.IS` suffix. The FX shock (USD/TRY % change) applies only to TRY-denominated holdings, so a +25% USD/TRY move alone costs a lira asset 1 − 1/1.25 = 20% in USD. The presets are hypothetical shocks loosely calibrated to past episodes: COVID-19 (Feb–Mar 2020), the 2022 tech de-rating, the Aug 2018 lira crisis, and a surprise Fed tightening.
+
 ---
 
 ## Testing
@@ -216,6 +240,7 @@ pytest -v
 
 - `tests/test_risk_engine.py`: volatility, VaR, max drawdown and Sharpe against closed-form values; risk-score bounds, weighting and re-normalization; sentiment classification; P&L and daily-move flags.
 - `tests/test_correlation_benchmark.py`: cross-market date alignment, Pearson correlation (±1, hand-calculated, zero-variance and too-few-observation cases), pair ranking, benchmark selection, rebasing, beta and windowing.
+- `tests/test_simulation.py`: log-returns and FX conversion; Cholesky on positive-definite, perfectly collinear, linear-combination and zero-variance single-asset matrices; seeded determinism; zero-volatility paths matching the closed form; ρ = ±1 transmission through the Cholesky factor; antithetic mirroring; ordered percentile bands; the zero-drift martingale; hand-calculated VaR/CVaR and the CVaR ≥ VaR invariant; every stress preset, custom FX shocks on `.IS` holdings and input validation; plus API tests for both endpoints.
 - `tests/test_api.py`: full CRUD, correlation and benchmark endpoints, validation (`409` / `404` / `422`), stock history and alert deduplication, using an in-memory SQLite database and a deterministic fake market data provider.
 
 ```bash

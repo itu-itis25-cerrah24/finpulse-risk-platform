@@ -143,6 +143,100 @@ export interface BenchmarkComparison {
   observations: number;
 }
 
+// ---------------------------------------------------------------------------
+// Risk Lab
+// ---------------------------------------------------------------------------
+
+export type DriftModel = "historical" | "zero";
+
+export interface MonteCarloBand {
+  /** Trading days from today; day 0 is the current value. */
+  day: number;
+  p5: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  p95: number;
+}
+
+export interface SimulatedHolding {
+  symbol: string;
+  value_usd: number;
+  weight_pct: number;
+  annualized_drift_pct: number;
+  annualized_volatility_pct: number;
+  fx_adjusted: boolean;
+}
+
+export interface MonteCarloResult {
+  horizon_days: number;
+  simulations: number;
+  seed: number | null;
+  drift_model: DriftModel;
+  confidence: number;
+  observations: number;
+  start_date: string;
+  end_date: string;
+  cholesky_jitter: number;
+  holdings: SimulatedHolding[];
+  initial_value: number;
+  expected_value: number;
+  median_value: number;
+  expected_return_pct: number;
+  /** USD loss at the 95% level (positive = loss). */
+  var_95_simulated: number;
+  var_95_pct: number;
+  /** Expected Shortfall: mean loss beyond VaR, always >= VaR. */
+  cvar_95_simulated: number;
+  cvar_95_pct: number;
+  probability_of_loss_pct: number;
+  bands: MonteCarloBand[];
+  excluded_symbols: string[];
+}
+
+export type ScenarioKey = "covid_crash" | "tech_selloff" | "usd_try_spike" | "rate_hike";
+export type MarketSegment = "US_EQUITY" | "BIST_EQUITY";
+
+export interface StressShocks {
+  us_equity_shock_pct: number;
+  bist_equity_shock_pct: number;
+  /** % change in TRY per USD; positive = lira depreciation. */
+  usd_try_shock_pct: number;
+}
+
+export interface StressScenario extends StressShocks {
+  key: ScenarioKey;
+  label: string;
+  description: string;
+}
+
+/** A preset scenario or custom shocks; the API rejects a mix of both. */
+export type StressTestRequest = { scenario: ScenarioKey } | StressShocks;
+
+export interface StressImpact {
+  symbol: string;
+  segment: MarketSegment;
+  currency: string | null;
+  value_before_usd: number;
+  value_after_usd: number;
+  pnl_usd: number;
+  pnl_pct: number;
+  equity_shock_pct: number;
+  fx_shock_pct: number;
+}
+
+export interface StressTestResult extends StressShocks {
+  scenario: ScenarioKey | null;
+  label: string;
+  positions: StressImpact[];
+  total_before_usd: number;
+  total_after_usd: number;
+  total_pnl_usd: number;
+  total_pnl_pct: number | null;
+  worst_hit_symbol: string | null;
+  excluded_symbols: string[];
+}
+
 export interface NewPosition {
   symbol: string;
   shares: number;
