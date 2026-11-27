@@ -18,9 +18,11 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from services.monte_carlo import cholesky_with_jitter, covariance_matrix
+from services.monte_carlo import covariance_matrix
 from services.risk_engine import RISK_FREE_RATE_ANNUAL, TRADING_DAYS_PER_YEAR
 
+# Smallest allowed eigenvalue of the covariance, relative to the mean variance.
+MIN_EIGENVALUE_RATIO = 1e-8
 DEFAULT_SAMPLES = 4000
 CLOUD_POINTS = 300
 MAX_FRONTIER_POINTS = 60
@@ -39,20 +41,53 @@ SPARSE_ALPHA = 0.3
 class AnnualizedMoments:
     mean: NDArray[np.float64]  # annualised mean log-return per asset
     covariance: NDArray[np.float64]  # annualised covariance (jitter already added)
-    jitter: float  # daily-scale ridge added to make the covariance positive definite
+    jitter: float  # daily-scale ridge added so the smallest eigenvalue clears the floor
+
+
+def regularize_covariance(
+    covariance: ArrayLike,
+    min_eigenvalue_ratio: float = MIN_EIGENVALUE_RATIO,
+) -> tuple[NDArray[np.float64], float]:
+    """Make a covariance matrix strictly positive definite on every platform.
+
+    A sample covariance is only positive *semi*-definite: collinear or
+    zero-variance holdings give a smallest eigenvalue of 0, which floating-point
+    rounding turns into ±1e-18. Whether ``np.linalg.cholesky`` then succeeds
+    depends on the BLAS build (e.g. OpenBLAS on Linux vs. Windows), so a
+    pass/fail Cholesky probe is not a reliable test.
+
+    Instead the smallest eigenvalue (``eigvalsh``, exact for symmetric
+    matrices) is lifted to a floor of ``min_eigenvalue_ratio × mean variance``
+    by adding a ridge ``εI``. Adding ``εI`` shifts every eigenvalue by exactly
+    ``ε``, so the result has ``λ_min ≥ floor``: about eight orders of magnitude
+    above rounding noise, yet far too small to move any reported statistic.
+    Well-conditioned matrices are returned unchanged (ridge = 0).
+    """
+    cov = np.atleast_2d(np.asarray(covariance, dtype=float))
+    if cov.ndim != 2 or cov.shape[0] != cov.shape[1]:
+        raise ValueError("covariance must be a square matrix")
+    if not np.all(np.isfinite(cov)):
+        raise ValueError("covariance contains non-finite values")
+    cov = (cov + cov.T) / 2  # eigvalsh assumes exact symmetry
+
+    scale = float(np.mean(np.abs(np.diag(cov)))) or 1.0
+    floor = min_eigenvalue_ratio * scale
+    smallest = float(np.linalg.eigvalsh(cov)[0])  # eigenvalues come back in ascending order
+    if smallest >= floor:
+        return cov, 0.0
+    ridge = floor - smallest
+    return cov + ridge * np.eye(cov.shape[0]), ridge
 
 
 def annualized_moments(log_returns: ArrayLike, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> AnnualizedMoments:
     """Annualise the mean (× 252) and covariance (× 252) of daily log-returns.
 
-    The covariance goes through the same Cholesky-with-jitter check used by the
-    Monte Carlo engine, so a singular matrix (collinear or zero-variance
-    holdings) is regularised before it is used.
+    The daily covariance is regularised first (see ``regularize_covariance``),
+    so a singular matrix from collinear or zero-variance holdings is made
+    strictly positive definite. Scaling by 252 preserves that property.
     """
     r = np.asarray(log_returns, dtype=float)
-    cov = covariance_matrix(r)
-    _, jitter = cholesky_with_jitter(cov)
-    regularised = cov + jitter * np.eye(cov.shape[0])
+    regularised, jitter = regularize_covariance(covariance_matrix(r))
     return AnnualizedMoments(
         mean=r.mean(axis=0) * periods_per_year,
         covariance=regularised * periods_per_year,

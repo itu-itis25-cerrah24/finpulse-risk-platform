@@ -25,7 +25,7 @@ A full-stack risk analytics terminal for mixed **BIST (Borsa Istanbul)** and **g
 | **Thread-safe alert deduplication** | Alert rules (sharp drop/spike, high risk score, bearish news, deep drawdown) are pure functions. Persistence uses a check-then-insert under a lock, so concurrent refreshes (multiple tabs, React StrictMode) never store the same alert twice in one day. |
 | **Concurrent data fetching** | Positions are analyzed in parallel with a `ThreadPoolExecutor`, since the work is network-bound. |
 | **Graceful degradation** | Missing prices, empty news or upstream outages return well-defined fallbacks instead of 500s. The UI shows `NO DATA` or an offline state. |
-| **145 automated tests + CI** | `pytest` suite covering every quant metric, correlation, date alignment, beta and benchmark rebasing, seeded Monte Carlo determinism, optimizer weight validity, frontier dominance, the closed-form minimum-variance check, the Cholesky fallback, the CVaR ≥ VaR invariant, every stress scenario, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). **GitHub Actions** runs the backend tests and the strict TypeScript check and production build on every push and pull request to `main`. |
+| **149 automated tests + CI** | `pytest` suite covering every quant metric, correlation, date alignment, beta and benchmark rebasing, seeded Monte Carlo determinism, optimizer weight validity, frontier dominance, the closed-form minimum-variance check, the Cholesky fallback, the CVaR ≥ VaR invariant, every stress scenario, risk-score edge cases, sentiment and P&L, plus API tests that run against an in-memory database and a fake market data provider (no network needed). **GitHub Actions** runs the backend tests and the strict TypeScript check and production build on every push and pull request to `main`. |
 
 ---
 
@@ -109,7 +109,7 @@ finpulse-risk-platform/
 │   │   ├── optimizer.py        # Markowitz simplex search, efficient frontier
 │   │   ├── portfolio_service.py# Orchestration + USD aggregation
 │   │   └── alert_service.py    # Alert rules + deduplicated persistence
-│   ├── tests/                  # 145 pytest tests
+│   ├── tests/                  # 149 pytest tests
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
@@ -156,7 +156,7 @@ python -m venv .venv
 # Windows:  .\.venv\Scripts\Activate.ps1
 # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-pytest                                   # 145 tests
+pytest                                   # 149 tests
 uvicorn main:app --reload --port 8000
 ```
 
@@ -230,7 +230,7 @@ On first startup the backend seeds a demo portfolio of `THYAO.IS`, `ASELS.IS`, `
 
 ### Portfolio optimization (Markowitz MPT)
 
-1. **Inputs.** The optimizer uses the same date-aligned USD log-returns as the Monte Carlo engine. The annualized mean is μ = 252 · mean(ℓ) and the covariance is Σ = 252 · cov(ℓ). When Σ is singular, the Cholesky jitter fallback is added to it.
+1. **Inputs.** The optimizer uses the same date-aligned USD log-returns as the Monte Carlo engine. The annualized mean is μ = 252 · mean(ℓ) and the covariance is Σ = 252 · cov(ℓ). Σ is then made strictly positive definite with an **eigenvalue floor**: if the smallest eigenvalue (`eigvalsh`) is below 10⁻⁸ × the mean variance, a ridge εI lifts it exactly to that floor. A pass/fail Cholesky probe is not enough here: for collinear holdings λ_min is 0 up to ±1e-18 rounding, and whether Cholesky succeeds then depends on the BLAS build (it can pass on Windows and fail on Linux/OpenBLAS). The floor is about eight orders of magnitude above that noise, so the result is identical on every platform.
 2. **Candidates.** Long-only weights live on the simplex {w ≥ 0, Σw = 1}. Half the samples are Dirichlet(1), which is uniform on the simplex. The other half are Dirichlet(0.3), which pushes weight toward the edges and corners, where constrained optima usually sit.
 3. **Anchors.** The current allocation, every 100% single-asset corner and equal weight are always included. As a result, the min-volatility portfolio is never riskier than the current one, and the max-Sharpe portfolio never has a lower Sharpe ratio.
 4. **Scoring.** For every candidate, return = wᵀμ, volatility = √(wᵀΣw) and Sharpe = (return − 4%) / volatility. All candidates are scored at once in a single vectorized `einsum`.
@@ -258,7 +258,7 @@ pytest -v
 - `tests/test_correlation_benchmark.py`: cross-market date alignment, Pearson correlation (±1, hand-calculated, zero-variance and too-few-observation cases), pair ranking, benchmark selection, rebasing, beta and windowing.
 - `tests/test_simulation.py`: log-returns and FX conversion; Cholesky on positive-definite, perfectly collinear, linear-combination and zero-variance single-asset matrices; seeded determinism; zero-volatility paths matching the closed form; ρ = ±1 transmission through the Cholesky factor; antithetic mirroring; ordered percentile bands; the zero-drift martingale; hand-calculated VaR/CVaR and the CVaR ≥ VaR invariant; every stress preset, custom FX shocks on `.IS` holdings and input validation; plus API tests for both endpoints.
 - `tests/test_optimizer.py` covers:
-  - annualization and singular-covariance regularization;
+  - annualization, and the eigenvalue floor for singular covariances (including ±1e-18 rounding on either side of zero);
   - simplex sampling (non-negative weights that sum to 1, anchors, seeded);
   - hand-calculated return, volatility and Sharpe;
   - efficient-frontier dominance and thinning;

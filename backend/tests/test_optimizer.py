@@ -17,6 +17,7 @@ from models import WatchlistItem
 from schemas import RebalanceAction
 from services.market_service import MarketService, NewsHeadline, PricePoint, Quote
 from services.optimizer import (
+    MIN_EIGENVALUE_RATIO,
     AnnualizedMoments,
     annualized_moments,
     cloud_indices,
@@ -24,6 +25,7 @@ from services.optimizer import (
     normalize_weights,
     optimize_portfolio,
     portfolio_stats,
+    regularize_covariance,
     sample_weights,
 )
 from services.portfolio_service import rebalancing_plan
@@ -68,6 +70,29 @@ def test_annualized_moments_regularise_singular_covariance() -> None:
     moments = annualized_moments(np.column_stack([a, cash]))
     assert moments.jitter > 0
     np.linalg.cholesky(moments.covariance)  # now positive definite
+
+
+@pytest.mark.parametrize("rounding_error", [-1e-18, 0.0, 1e-18])
+def test_regularize_covariance_floors_smallest_eigenvalue(rounding_error: float) -> None:
+    """Rank-1 matrix whose zero eigenvalue is nudged as different BLAS builds would round it."""
+    v = np.array([0.01, 0.02, 0.03])
+    cov = np.outer(v, v) + rounding_error * np.eye(3)
+
+    regularised, ridge = regularize_covariance(cov)
+    floor = MIN_EIGENVALUE_RATIO * np.mean(np.diag(cov))
+    assert ridge > 0
+    assert np.linalg.eigvalsh(regularised)[0] == pytest.approx(floor, rel=1e-6)
+    np.linalg.cholesky(regularised)
+    np.linalg.cholesky(regularised * 252)  # annualising keeps it positive definite
+
+
+def test_regularize_covariance_leaves_well_conditioned_matrix_unchanged() -> None:
+    cov = np.array([[0.04, 0.006], [0.006, 0.09]])
+    regularised, ridge = regularize_covariance(cov)
+    assert ridge == 0.0
+    np.testing.assert_array_equal(regularised, cov)
+    with pytest.raises(ValueError):
+        regularize_covariance(np.ones((2, 3)))
 
 
 def test_normalize_weights() -> None:
@@ -207,10 +232,10 @@ def test_single_asset_returns_current_allocation() -> None:
 
 def test_collinear_portfolio_does_not_crash() -> None:
     a = _returns()[:, 0]
-    # Identical columns: singular in exact arithmetic (rounding may or may not need the jitter).
+    # Identical columns: λ_min is 0 up to rounding, so the eigenvalue floor always applies.
     result = optimize_portfolio([0.5, 0.5], np.column_stack([a, a]), samples=500, seed=0)
-    assert result.moments.jitter >= 0
-    np.linalg.cholesky(result.moments.covariance)
+    assert result.moments.jitter > 0
+    np.linalg.cholesky(result.moments.covariance)  # strictly positive definite on every BLAS
     assert result.min_volatility.weights.sum() == pytest.approx(1.0)
     # Every mix of two identical assets has the same risk/return.
     np.testing.assert_allclose(result.cloud.volatility, result.current.volatility, rtol=1e-6)
